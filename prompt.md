@@ -1,8 +1,13 @@
 # mini-llmcache
 
-main project: [LMCache](https://github.com/LMCache/LMCache)
+请帮我测试一下 mini-llmcache 是否正常工作，包括模型加载、推理、缓存等， 并提供测试结果，测试过程遇到Bug, 请自行定位并修复。
 
-# quickstart
+## 环境
+
+镜像环境： vllm-ascend-env
+权重路径： /home/jianzhnie/llmtuner/hfhub/models/Qwen/Qwen3-0.6B
+
+## 测试 mini-llmcache
 
 ```bash
 python -m mini_llmcache.server --port 45881 --l1-size-gb 8 \
@@ -23,14 +28,3 @@ curl -s http://localhost:8000/v1/completions -H 'Content-Type: application/json'
     \"model\": \"Qwen/Qwen3-0.6B\", \"temperature\": 0, \"max_tokens\": 24,
     \"prompt\": \"$(python3 -c "print('A field guide to the birds of North America. ' * 80)")\"}"
 ```
-
-cache server output:
-
-```
-mini cache server up and ready on tcp://127.0.0.1:45881 (chunk_size=256, 8 GB L1, 1 L2 adapters)
-REGISTER Qwen/Qwen3-0.6B rank 0/1 (chunk=28 MiB, 1 engines)
-STORE rid=cmpl-...-0 tokens [0, 768) L0->L1 38.1 GB/s
-RETRIEVE rid=cmpl-...-0 tokens [0, 768) hit L1=3 L2=0 | L2->L1 0.0 GB/s | L1->L0 35.7 GB/s
-```
-
-The first STORE and first RETRIEVE need a warmup (30-40x slower).

@@ -1,0 +1,99 @@
+[build-system]
+requires = ["setuptools>=64.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmeval"
+version = "1.0.0"
+description = "A comprehensive evaluation system for assessing Large Language Models (LLMs) on mathematical reasoning benchmarks."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+keywords = ["llm", "evaluation", "benchmark", "math", "vllm", "aime"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+authors = [
+    { name = "jianzhnie", email = "jianzhnie@gmail.com" },
+]
+dependencies = [
+    "datasets",
+    "httpx",
+    "math-verify",
+    "openai>=2.0.0",
+    "Pebble",
+    "tqdm",
+    "transformers",
+]
+
+[project.urls]
+Homepage = "https://gitee.com/jianzhnie/LLMEval"
+Repository = "https://gitee.com/jianzhnie/LLMEval"
+Issues = "https://gitee.com/jianzhnie/LLMEval/issues"
+
+[project.optional-dependencies]
+vllm = [
+    "vllm>=0.7.0",
+]
+npu = [
+    "vllm-ascend>=0.7.3",
+]
+all = [
+    "vllm>=0.7.0",
+    "vllm-ascend>=0.7.3",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["llmeval*"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+extend-exclude = [
+    ".git",
+    "__pycache__",
+    ".mypy_cache",
+    ".ruff_cache",
+    "*.ipynb",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "lf"
+
+[tool.ruff.lint]
+select = [
+    "F",     # Pyflakes
+    "E",     # Pycodestyle errors
+    "W",     # Pycodestyle warnings
+    "I",     # Isort
+    "B",     # Flake8-bugbear
+    "C4",    # Flake8-comprehensions
+    "SIM",   # Flake8-simplify
+    "UP",    # Pyupgrade
+    "RUF",   # Ruff-specific rules
+]
+ignore = [
+    "E402",   # Import not at top (intentional: from __future__ + docstring pattern)
+    "E501",   # Line too long (handled by formatter)
+    "RUF001", # Ambiguous unicode in strings (intentional: Chinese prompt templates)
+    "RUF003", # Ambiguous unicode in comments (intentional: Chinese comments in templates)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["llmeval"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-v", "--tb=short", "--strict-markers"]
