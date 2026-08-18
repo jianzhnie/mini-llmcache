@@ -3,9 +3,9 @@ requires = ["setuptools>=64.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "llmeval"
+name = "mini-llmcache"
 version = "1.0.0"
-description = "A comprehensive evaluation system for assessing Large Language Models (LLMs) on mathematical reasoning benchmarks."
+description = "A mini LLM cache for VLLM."
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
@@ -35,17 +35,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://gitee.com/jianzhnie/LLMEval"
-Repository = "https://gitee.com/jianzhnie/LLMEval"
-Issues = "https://gitee.com/jianzhnie/LLMEval/issues"
+Homepage = "https://gitee.com/jianzhnie/mini-llmcache"
+Repository = "https://gitee.com/jianzhnie/mini-llmcache"
+Issues = "https://gitee.com/jianzhnie/mini-llmcache/issues"
 
 [project.optional-dependencies]
-vllm = [
-    "vllm>=0.7.0",
-]
-npu = [
-    "vllm-ascend>=0.7.3",
-]
 all = [
     "vllm>=0.7.0",
     "vllm-ascend>=0.7.3",
@@ -53,7 +47,7 @@ all = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["llmeval*"]
+include = ["mini_llmcache*"]
 
 [tool.ruff]
 line-length = 88
@@ -92,7 +86,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["llmeval"]
+known-first-party = ["mini_llmcache"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
