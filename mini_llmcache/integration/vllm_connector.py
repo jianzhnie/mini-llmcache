@@ -9,14 +9,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 
-from lmcache_mini.l0 import kv_format
-from lmcache_mini.l0.transfer import (
+from mini_llmcache.l0 import kv_format
+from mini_llmcache.l0.device import DEV
+from mini_llmcache.l0.transfer import (
     DeviceFuture,
-    export_event,
     export_kv_caches,
 )
-from lmcache_mini.mq import MQClient
-from lmcache_mini.protocol import (
+from mini_llmcache.mq import MQClient
+from mini_llmcache.protocol import (
     FreeLocksPayload,
     LoadStoreOp,
     LookupPayload,
@@ -187,13 +187,14 @@ class MiniConnector(KVConnectorBase_V1):
                if m.req == req]
         if not ops:
             return {}
-        producer = torch.cuda.Event(interprocess=True)
-        producer.record()
-        handle = export_event(producer)
-        device = torch.cuda.current_device()
+        # Freeze our device state so the cache server can safely read/write
+        # the shared KV tensors.  (Replaces the CUDA-only interprocess-event
+        # handshake, which Ascend NPU does not support.)
+        DEV.synchronize()
+        device = DEV.current_device()
         return {
             m.request_id: DeviceFuture(self.client.submit(req, TransferPayload(
-                m.request_id, self.instance_id, m.op, handle)), device)
+                m.request_id, self.instance_id, m.op, None)), device)
             for m in ops
         }
 

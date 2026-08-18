@@ -3,7 +3,7 @@ import threading
 import time
 from collections import OrderedDict
 
-from lmcache_mini.l1.manager import Listener
+from mini_llmcache.l1.manager import Listener
 
 WATERMARK = 0.8
 EVICTION_RATIO = 0.2

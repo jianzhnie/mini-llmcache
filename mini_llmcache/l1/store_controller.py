@@ -2,7 +2,7 @@
 import queue
 import threading
 
-from lmcache_mini.l1.manager import Listener
+from mini_llmcache.l1.manager import Listener
 
 
 class StoreController(Listener):

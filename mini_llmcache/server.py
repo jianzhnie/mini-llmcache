@@ -4,13 +4,13 @@ import json
 import threading
 from dataclasses import dataclass
 
-from lmcache_mini.hasher import chunk_hashes
-from lmcache_mini.l0.transfer import KVTransfer, export_event
-from lmcache_mini.l2.fs import FSAdapter
-from lmcache_mini.l2.mock import MockAdapter
-from lmcache_mini.mq import MQServer
-from lmcache_mini.protocol import ChunkKey, Req
-from lmcache_mini.storage_manager import StorageManager
+from mini_llmcache.hasher import chunk_hashes
+from mini_llmcache.l0.transfer import KVTransfer
+from mini_llmcache.l2.fs import FSAdapter
+from mini_llmcache.l2.mock import MockAdapter
+from mini_llmcache.mq import MQServer
+from mini_llmcache.protocol import ChunkKey, Req
+from mini_llmcache.storage_manager import StorageManager
 
 
 @dataclass
@@ -112,21 +112,20 @@ class CacheServer:
                 objs.append(reserved[key])
                 block_ids.extend(op.block_ids[chunk * blocks_per_chunk:
                                               (chunk + 1) * blocks_per_chunk])
-        event, elapsed = instance.transfer.store(block_ids, objs,
-                                                 payload.event_handle)
+        elapsed = instance.transfer.store(block_ids, objs)
         self.sm.l1.finish_write(written)
         nbytes = len(objs) * instance.transfer.chunk_nbytes
         print(f"STORE rid={payload.request_id} tokens [{op.start}, {op.end}) "
               f"L0->L1 {nbytes / elapsed / 1e9:.1f} GB/s", flush=True)
-        return export_event(event)
+        return True
 
     def retrieve(self, payload):
         op = payload.op
         instance = self.instances[payload.instance_id]
         keys = self.op_keys(op, instance)
         l1_keys, l2_keys, l2_gbps = self.sm.prefetch.query(payload.request_id)
-        event, elapsed = instance.transfer.load(
-            op.block_ids, self.sm.l1.read(keys), payload.event_handle,
+        elapsed = instance.transfer.load(
+            op.block_ids, self.sm.l1.read(keys),
             skip_blocks=op.skip_first_n_tokens // instance.block_size)
         self.sm.prefetch.release(payload.request_id, keys)
         nbytes = len(keys) * instance.transfer.chunk_nbytes
@@ -135,7 +134,7 @@ class CacheServer:
               f"hit L1={l1_keys // world_size} L2={l2_keys // world_size} | "
               f"L2->L1 {l2_gbps:.1f} GB/s | "
               f"L1->L0 {nbytes / elapsed / 1e9:.1f} GB/s", flush=True)
-        return export_event(event)
+        return True
 
 
 REGISTRY = {"fs": FSAdapter, "mock": MockAdapter}

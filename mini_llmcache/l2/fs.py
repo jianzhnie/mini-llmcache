@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 
-from lmcache_mini.l2.base import L2Adapter
+from mini_llmcache.l2.base import L2Adapter
 
 
 def filename(key):

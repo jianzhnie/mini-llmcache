@@ -9,7 +9,7 @@ description = "A mini LLM cache for VLLM."
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
-keywords = ["llm", "evaluation", "benchmark", "math", "vllm", "aime"]
+keywords = ["llm", "kv-cache", "lmcache", "vllm"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -25,13 +25,9 @@ authors = [
     { name = "jianzhnie", email = "jianzhnie@gmail.com" },
 ]
 dependencies = [
-    "datasets",
-    "httpx",
-    "math-verify",
-    "openai>=2.0.0",
-    "Pebble",
-    "tqdm",
-    "transformers",
+    "pyzmq",
+    "blake3",
+    "torch",
 ]
 
 [project.urls]

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-from lmcache_mini.l2.base import L2Adapter
+from mini_llmcache.l2.base import L2Adapter
 
 
 class MockAdapter(L2Adapter):

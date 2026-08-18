@@ -8,7 +8,7 @@ from concurrent.futures import Future
 
 import zmq
 
-from lmcache_mini.protocol import Req
+from mini_llmcache.protocol import Req
 
 
 class SocketLoop:

@@ -2,8 +2,8 @@
 import threading
 from dataclasses import dataclass
 
-from lmcache_mini.l1.memory import MemoryObj
-from lmcache_mini.protocol import ChunkKey
+from mini_llmcache.l1.memory import MemoryObj
+from mini_llmcache.protocol import ChunkKey
 
 
 class Listener:
