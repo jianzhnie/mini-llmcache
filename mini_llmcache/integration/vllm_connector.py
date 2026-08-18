@@ -170,7 +170,15 @@ class MiniConnector(KVConnectorBase_V1):
         return True, None
 
     def register_kv_caches(self, kv_caches):
-        layers = [t for _, t in sorted(kv_caches.items())]
+        # Upstream vLLM passes one fused tensor per layer; vllm-ascend passes
+        # a (k_cache, v_cache) tuple per layer.  Flatten either way — each
+        # tensor becomes one "layer" for the transfer pipelines.
+        layers = []
+        for _, cache in sorted(kv_caches.items()):
+            if isinstance(cache, tuple):
+                layers.extend(cache)
+            else:
+                layers.append(cache)
         views = kv_format.normalize(
             layers, self.vllm_config.cache_config.num_gpu_blocks)
         self.client.call(Req.REGISTER_KV_CACHE, RegisterPayload(
