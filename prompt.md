@@ -4,7 +4,8 @@
 
 ## 环境
 
-镜像环境： vllm-ascend-env
+Docker 镜像： quay.io/ascend/vllm-ascend:v0.23.0rc1-a3  
+Docker 容器： vllm-ascend-env
 权重路径： /home/jianzhnie/llmtuner/hfhub/models/Qwen/Qwen3-0.6B
 
 ## 测试 mini-llmcache

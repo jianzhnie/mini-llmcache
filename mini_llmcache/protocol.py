@@ -13,6 +13,7 @@ class Req(enum.IntEnum):
     STORE = 7
     FREE_LOOKUP_LOCKS = 8
     END_SESSION = 9
+    TRANSFER_ACK = 10
 
 
 @dataclass(frozen=True)
@@ -45,7 +46,7 @@ class RegisterPayload:
     rank: int
     world_size: int
     block_size: int
-    ipc_handles: list = field(default_factory=list)
+    chunk_nbytes: int
 
 
 @dataclass
@@ -61,7 +62,17 @@ class TransferPayload:
     request_id: str
     instance_id: int
     op: LoadStoreOp
-    event_handle: bytes
+    chunks: list = field(default_factory=list)  # STORE: list[bytes]
+    elapsed: float = 0.0  # connector-side transfer seconds
+    nbytes: int = 0
+
+
+@dataclass
+class AckPayload:
+    request_id: str
+    kind: str  # "STORE" | "RETRIEVE"
+    nbytes: int
+    elapsed: float
 
 
 @dataclass

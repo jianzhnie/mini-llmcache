@@ -5,7 +5,6 @@ import threading
 from dataclasses import dataclass
 
 from mini_llmcache.hasher import chunk_hashes
-from mini_llmcache.l0.transfer import KVTransfer
 from mini_llmcache.l2.fs import FSAdapter
 from mini_llmcache.l2.mock import MockAdapter
 from mini_llmcache.mq import MQServer
@@ -15,10 +14,11 @@ from mini_llmcache.storage_manager import StorageManager
 
 @dataclass
 class EngineInstance:
-    transfer: KVTransfer
+    rank: int
     model: str
     world_size: int
     block_size: int
+    chunk_nbytes: int
 
 
 class CacheServer:
@@ -39,6 +39,7 @@ class CacheServer:
             (Req.RETRIEVE, self.retrieve),
             (Req.FREE_LOOKUP_LOCKS, self.free_locks),
             (Req.END_SESSION, self.end_session),
+            (Req.TRANSFER_ACK, self.ack),
         ]:
             self.mq.register(req, fn)
 
@@ -50,15 +51,13 @@ class CacheServer:
 
     def register(self, payload):
         with self.register_lock:
-            transfer = KVTransfer(payload.ipc_handles, payload.block_size,
-                                  self.chunk_size, payload.rank)
             self.deployments[(payload.model, payload.world_size)] = \
-                transfer.chunk_nbytes
+                payload.chunk_nbytes
             self.instances[payload.instance_id] = EngineInstance(
-                transfer, payload.model, payload.world_size,
-                payload.block_size)
+                payload.rank, payload.model, payload.world_size,
+                payload.block_size, payload.chunk_nbytes)
         print(f"REGISTER {payload.model} rank {payload.rank}/"
-              f"{payload.world_size} (chunk={transfer.chunk_nbytes >> 20} MiB, "
+              f"{payload.world_size} (chunk={payload.chunk_nbytes >> 20} MiB, "
               f"{len(self.instances)} engines)", flush=True)
         return True
 
@@ -72,7 +71,7 @@ class CacheServer:
     def op_keys(self, op, instance):
         hashes = chunk_hashes(op.token_ids[:op.end], self.chunk_size)
         return self.keys_for(hashes[op.start // self.chunk_size:],
-                             instance.model, [instance.transfer.rank])
+                             instance.model, [instance.rank])
 
     def lookup(self, payload):
         chunk_nbytes = self.deployments.get((payload.model, payload.world_size))
@@ -102,21 +101,21 @@ class CacheServer:
         op = payload.op
         instance = self.instances[payload.instance_id]
         keys = self.op_keys(op, instance)
-        reserved = self.sm.l1.reserve_write(keys,
-                                            instance.transfer.chunk_nbytes)
-        blocks_per_chunk = instance.transfer.blocks_per_chunk
-        written, objs, block_ids = [], [], []
+        reserved = self.sm.l1.reserve_write(keys, instance.chunk_nbytes)
+        written, objs, blobs = [], [], []
         for chunk, key in enumerate(keys):
             if reserved[key] is not None:
                 written.append(key)
                 objs.append(reserved[key])
-                block_ids.extend(op.block_ids[chunk * blocks_per_chunk:
-                                              (chunk + 1) * blocks_per_chunk])
-        elapsed = instance.transfer.store(block_ids, objs)
+                blobs.append(payload.chunks[chunk])
+        for obj, blob in zip(objs, blobs):
+            obj.byte_array[:] = blob
         self.sm.l1.finish_write(written)
-        nbytes = len(objs) * instance.transfer.chunk_nbytes
+        nbytes = len(objs) * instance.chunk_nbytes
+        elapsed = payload.elapsed
+        gbps = nbytes / elapsed / 1e9 if elapsed > 0 else 0.0
         print(f"STORE rid={payload.request_id} tokens [{op.start}, {op.end}) "
-              f"L0->L1 {nbytes / elapsed / 1e9:.1f} GB/s", flush=True)
+              f"L0->L1 {gbps:.1f} GB/s", flush=True)
         return True
 
     def retrieve(self, payload):
@@ -124,16 +123,21 @@ class CacheServer:
         instance = self.instances[payload.instance_id]
         keys = self.op_keys(op, instance)
         l1_keys, l2_keys, l2_gbps = self.sm.prefetch.query(payload.request_id)
-        elapsed = instance.transfer.load(
-            op.block_ids, self.sm.l1.read(keys),
-            skip_blocks=op.skip_first_n_tokens // instance.block_size)
+        objs = self.sm.l1.read(keys)
+        chunks = [bytes(obj.byte_array) for obj in objs]
         self.sm.prefetch.release(payload.request_id, keys)
-        nbytes = len(keys) * instance.transfer.chunk_nbytes
         world_size = instance.world_size
         print(f"RETRIEVE rid={payload.request_id} tokens [{op.start}, {op.end}) "
               f"hit L1={l1_keys // world_size} L2={l2_keys // world_size} | "
-              f"L2->L1 {l2_gbps:.1f} GB/s | "
-              f"L1->L0 {nbytes / elapsed / 1e9:.1f} GB/s", flush=True)
+              f"L2->L1 {l2_gbps:.1f} GB/s | {len(chunks)} chunks sent",
+              flush=True)
+        return chunks
+
+    def ack(self, payload):
+        gbps = payload.nbytes / payload.elapsed / 1e9 \
+            if payload.elapsed > 0 else 0.0
+        print(f"{payload.kind} rid={payload.request_id} "
+              f"L1->L0 {gbps:.1f} GB/s", flush=True)
         return True
 
 

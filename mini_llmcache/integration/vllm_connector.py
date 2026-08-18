@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+import threading
 import uuid
 from dataclasses import dataclass, field
 
-import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -11,12 +11,10 @@ from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 
 from mini_llmcache.l0 import kv_format
 from mini_llmcache.l0.device import DEV
-from mini_llmcache.l0.transfer import (
-    DeviceFuture,
-    export_kv_caches,
-)
+from mini_llmcache.l0.transfer import DeviceFuture, KVTransfer
 from mini_llmcache.mq import MQClient
 from mini_llmcache.protocol import (
+    AckPayload,
     FreeLocksPayload,
     LoadStoreOp,
     LookupPayload,
@@ -63,6 +61,7 @@ class MiniConnector(KVConnectorBase_V1):
         self.store_futures: dict[str, list[DeviceFuture]] = {}
         self.load_futures: dict[str, DeviceFuture] = {}
         self.pending_sends: set[str] = set()
+        self.transfer: KVTransfer | None = None
 
     def generate_retrieve_op(self, tracker) -> LoadStoreOp | None:
         if not tracker.load_pending:
@@ -172,7 +171,10 @@ class MiniConnector(KVConnectorBase_V1):
     def register_kv_caches(self, kv_caches):
         # Upstream vLLM passes one fused tensor per layer; vllm-ascend passes
         # a (k_cache, v_cache) tuple per layer.  Flatten either way — each
-        # tensor becomes one "layer" for the transfer pipelines.
+        # tensor becomes one "layer" for the transfer pipelines.  The
+        # tensors stay in this process: all GPU<->host copies happen here,
+        # the cache server only ever sees bytes (Ascend NPU cannot share
+        # device memory across processes, matching upstream LMCache-Ascend).
         layers = []
         for _, cache in sorted(kv_caches.items()):
             if isinstance(cache, tuple):
@@ -181,13 +183,15 @@ class MiniConnector(KVConnectorBase_V1):
                 layers.append(cache)
         views = kv_format.normalize(
             layers, self.vllm_config.cache_config.num_gpu_blocks)
+        self.transfer = KVTransfer(views, self.block_size, self.chunk_size,
+                                   get_tensor_model_parallel_rank())
         self.client.call(Req.REGISTER_KV_CACHE, RegisterPayload(
             instance_id=self.instance_id,
             model=self.model,
-            rank=get_tensor_model_parallel_rank(),
+            rank=self.transfer.rank,
             world_size=self.world_size,
             block_size=self.block_size,
-            ipc_handles=export_kv_caches(views),
+            chunk_nbytes=self.transfer.chunk_nbytes,
         ))
 
     def submit_transfers(self, req):
@@ -195,16 +199,47 @@ class MiniConnector(KVConnectorBase_V1):
                if m.req == req]
         if not ops:
             return {}
-        # Freeze our device state so the cache server can safely read/write
-        # the shared KV tensors.  (Replaces the CUDA-only interprocess-event
-        # handshake, which Ascend NPU does not support.)
-        DEV.synchronize()
         device = DEV.current_device()
-        return {
-            m.request_id: DeviceFuture(self.client.submit(req, TransferPayload(
-                m.request_id, self.instance_id, m.op, None)), device)
-            for m in ops
-        }
+        out = {}
+        for m in ops:
+            if req == Req.STORE:
+                # D2H copy happens here in the vLLM worker; the cache server
+                # only receives the resulting bytes.
+                chunks, elapsed = self.transfer.to_host(m.op.block_ids)
+                nbytes = len(chunks) * self.transfer.chunk_nbytes
+                future = self.client.submit(req, TransferPayload(
+                    m.request_id, self.instance_id, m.op,
+                    chunks=chunks, elapsed=elapsed, nbytes=nbytes))
+                out[m.request_id] = DeviceFuture(future, device)
+            else:  # RETRIEVE: fetch bytes, then scatter them into the KV
+                # cache in a worker thread so the forward isn't blocked.
+                future = self.client.submit(req, TransferPayload(
+                    m.request_id, self.instance_id, m.op))
+                done = threading.Event()
+                threading.Thread(
+                    target=self._finish_load,
+                    args=(m.request_id, m.op, future, done),
+                    daemon=True).start()
+                out[m.request_id] = DeviceFuture(future, device,
+                                                 done_event=done)
+        return out
+
+    def _finish_load(self, request_id, op, future, done):
+        try:
+            DEV.set_device(self.transfer.device.index)
+            chunks = future.result()
+            if chunks is None:
+                raise RuntimeError("cache server returned no chunks")
+            elapsed = self.transfer.from_host(
+                chunks, op.block_ids,
+                skip_blocks=op.skip_first_n_tokens // self.block_size)
+            nbytes = len(chunks) * self.transfer.chunk_nbytes
+            self.client.submit(Req.TRANSFER_ACK, AckPayload(
+                request_id, "RETRIEVE", nbytes, elapsed))
+        except Exception as exc:  # fail soft: vLLM recomputes the tokens
+            print(f"RETRIEVE failed rid={request_id}: {exc}", flush=True)
+        finally:
+            done.set()
 
     def start_load_kv(self, forward_context, **kwargs):
         self.load_futures.update(self.submit_transfers(Req.RETRIEVE))

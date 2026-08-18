@@ -5,38 +5,36 @@ from concurrent.futures import Future
 import torch
 
 from mini_llmcache.l0.device import DEV
-from mini_llmcache.l1.memory import MemoryObj
-
-
-def export_kv_caches(tensors):
-    from torch.multiprocessing.reductions import reduce_tensor
-
-    return [reduce_tensor(t) for t in tensors]
-
-
-def import_kv_caches(ipc_handles):
-    return [rebuild(*args) for rebuild, args in ipc_handles]
 
 
 class DeviceFuture:
-    """Tracks a transfer submitted to the cache server.
+    """Tracks a transfer that was submitted to the cache server.
 
-    The server synchronizes its transfer streams before replying, so once the
-    message future resolves the GPU-side work is guaranteed visible.  (The
-    original cross-process CUDA event trick is not portable: Ascend NPU does
-    not support ``Event(interprocess=True)``.)
+    ``future`` resolves when the message round-trip completes;
+    ``done_event`` (when given) is set by a worker thread once the
+    GPU-side scatter into the KV cache has finished as well.
     """
 
-    def __init__(self, future: Future, device_index: int):
+    def __init__(self, future: Future, device_index: int,
+                 done_event: threading.Event | None = None):
         self.future = future
         self.device_index = device_index
+        self.done_event = done_event
 
     def done(self):
-        return self.future.done()
+        if not self.future.done():
+            return False
+        if self.done_event is not None:
+            return self.done_event.is_set()
+        return True
 
 
 class Pipeline:
-    """Two streams + three staging buffers: overlap kernel work and copies."""
+    """Two streams + three staging buffers: overlap kernel work and copies.
+
+    Runs inside the vLLM process — KV tensors are referenced directly, no
+    cross-process memory sharing is needed (which Ascend NPU cannot do).
+    """
 
     def __init__(self, kv_caches, blocks_per_chunk, block_nbytes,
                  chunk_nbytes):
@@ -46,6 +44,8 @@ class Pipeline:
         self.copy_stream = DEV.Stream(device)
         self.staging = torch.empty(3, chunk_nbytes, dtype=torch.uint8,
                                    device=device)
+        self.cpu_bufs = [torch.empty(chunk_nbytes, dtype=torch.uint8,
+                                     pin_memory=True) for _ in range(3)]
         self.ready = [DEV.Event() for _ in range(3)]
         self.free = [DEV.Event() for _ in range(3)]
         self.layer_views = []
@@ -60,82 +60,87 @@ class Pipeline:
 
 
 class KVTransfer:
-    def __init__(self, ipc_handles, block_size, chunk_size, rank):
+    def __init__(self, kv_caches, block_size, chunk_size, rank):
         self.rank = rank
-        self.kv_caches = import_kv_caches(ipc_handles)
-        self.device = self.kv_caches[0].device
-        self.num_layers = len(self.kv_caches)
+        self.kv_caches = kv_caches
+        self.device = kv_caches[0].device
+        self.num_layers = len(kv_caches)
         self.blocks_per_chunk = chunk_size // block_size
-        self.block_nbytes = self.kv_caches[0][0].nbytes
+        self.block_nbytes = kv_caches[0][0].nbytes
         self.chunk_nbytes = (self.num_layers * self.blocks_per_chunk
                              * self.block_nbytes)
-        self.d2h = Pipeline(self.kv_caches, self.blocks_per_chunk,
+        self.d2h = Pipeline(kv_caches, self.blocks_per_chunk,
                             self.block_nbytes, self.chunk_nbytes)
-        self.h2d = Pipeline(self.kv_caches, self.blocks_per_chunk,
+        self.h2d = Pipeline(kv_caches, self.blocks_per_chunk,
                             self.block_nbytes, self.chunk_nbytes)
 
-    def store(self, block_ids, objs: list[MemoryObj], producer_event_handle=None):
-        block_ids = torch.tensor(block_ids, dtype=torch.long, device=self.device)
+    def to_host(self, block_ids) -> tuple[list[bytes], float]:
+        """Copy the given blocks out of the GPU KV cache into bytes."""
+        n_chunks = len(block_ids) // self.blocks_per_chunk
+        block_ids_t = torch.tensor(block_ids, dtype=torch.long,
+                                   device=self.device)
         pipe = self.d2h
         with pipe.lock, DEV.device(self.device):
-            if producer_event_handle is not None:
-                pipe.kernel_stream.wait_event(producer_event_handle)
+            # Freeze all device work before reading the KV blocks
+            # (portable replacement for a producer event).
+            DEV.synchronize()
             begin = DEV.Event(enable_timing=True)
             begin.record(pipe.kernel_stream)
-            for i, obj in enumerate(objs):
+            for i in range(n_chunks):
                 buf = i % 3
-                block_ids_in_chunk = block_ids[
-                    i * self.blocks_per_chunk:(i + 1) * self.blocks_per_chunk]
+                ids = block_ids_t[i * self.blocks_per_chunk:
+                                  (i + 1) * self.blocks_per_chunk]
                 with DEV.stream(pipe.kernel_stream):
                     pipe.kernel_stream.wait_event(pipe.free[buf])
                     for layer, kv_cache in enumerate(self.kv_caches):
-                        torch.index_select(kv_cache, 0, block_ids_in_chunk,
+                        torch.index_select(kv_cache, 0, ids,
                                            out=pipe.layer_views[buf][layer])
                     pipe.ready[buf].record(pipe.kernel_stream)
                 with DEV.stream(pipe.copy_stream):
                     pipe.copy_stream.wait_event(pipe.ready[buf])
-                    obj.tensor.copy_(pipe.staging[buf], non_blocking=True)
+                    pipe.cpu_bufs[buf].copy_(pipe.staging[buf],
+                                             non_blocking=True)
                     pipe.free[buf].record(pipe.copy_stream)
             end = DEV.Event(enable_timing=True)
             end.record(pipe.copy_stream)
-            completion = DEV.Event()
-            completion.record(pipe.copy_stream)
-        # Wait until every block is in host memory before replying.
-        completion.synchronize()
-        return begin.elapsed_time(end) / 1e3
+            pipe.copy_stream.synchronize()
+            chunks = [pipe.cpu_bufs[i % 3].numpy().tobytes()
+                      for i in range(n_chunks)]
+        return chunks, begin.elapsed_time(end) / 1e3
 
-    def load(self, block_ids, objs: list[MemoryObj], producer_event_handle=None,
-             skip_blocks=0):
-        block_ids = torch.tensor(block_ids, dtype=torch.long, device=self.device)
+    def from_host(self, chunks: list[bytes], block_ids, skip_blocks=0) -> float:
+        """Scatter the given bytes back into the GPU KV cache."""
+        block_ids_t = torch.tensor(block_ids, dtype=torch.long,
+                                   device=self.device)
         pipe = self.h2d
         with pipe.lock, DEV.device(self.device):
-            if producer_event_handle is not None:
-                pipe.copy_stream.wait_event(producer_event_handle)
             begin = DEV.Event(enable_timing=True)
             begin.record(pipe.copy_stream)
-            for i, obj in enumerate(objs):
+            for i, blob in enumerate(chunks):
                 buf = i % 3
+                if i >= 3:
+                    # The previous use of this host buffer must be fully
+                    # consumed before we overwrite it with new data.
+                    pipe.free[buf].synchronize()
+                pipe.cpu_bufs[buf].copy_(torch.frombuffer(blob,
+                                                          dtype=torch.uint8))
                 skip = skip_blocks if i == 0 else 0
-                selected = self.blocks_per_chunk - skip
-                if selected <= 0:
-                    continue
-                block_ids_in_chunk = block_ids[
-                    i * self.blocks_per_chunk + skip:
-                    (i + 1) * self.blocks_per_chunk]
+                ids = block_ids_t[i * self.blocks_per_chunk + skip:
+                                  (i + 1) * self.blocks_per_chunk]
                 with DEV.stream(pipe.copy_stream):
                     pipe.copy_stream.wait_event(pipe.free[buf])
-                    pipe.staging[buf].copy_(obj.tensor, non_blocking=True)
+                    pipe.staging[buf].copy_(pipe.cpu_bufs[buf],
+                                            non_blocking=True)
                     pipe.ready[buf].record(pipe.copy_stream)
                 with DEV.stream(pipe.kernel_stream):
                     pipe.kernel_stream.wait_event(pipe.ready[buf])
                     for layer, kv_cache in enumerate(self.kv_caches):
-                        kv_cache.index_copy_(0, block_ids_in_chunk,
-                                             pipe.layer_views[buf][layer][skip:])
+                        kv_cache.index_copy_(
+                            0, ids, pipe.layer_views[buf][layer][skip:])
                     pipe.free[buf].record(pipe.kernel_stream)
             end = DEV.Event(enable_timing=True)
             end.record(pipe.kernel_stream)
-            completion = DEV.Event()
-            completion.record(pipe.kernel_stream)
-        # Wait until every block is back in the GPU KV cache before replying.
-        completion.synchronize()
+            # Guarantee the scatter is complete before the caller marks
+            # this transfer as finished (vLLM will read these blocks).
+            pipe.kernel_stream.synchronize()
         return begin.elapsed_time(end) / 1e3
