@@ -109,7 +109,7 @@ while transfer cost grows only with KV bytes.
 
 ## Tests
 
-49 pytest cases cover the hasher, pool allocator, L1 lock protocol, LRU, L2 adapters, ZMQ RPC (including
+50 pytest cases cover the hasher, pool allocator, L1 lock protocol, LRU, L2 adapters, ZMQ RPC (including
 error propagation), prefetch orchestration, a full server round-trip, and a device-gated GPU⇄host transfer
 round-trip (runs where a GPU/NPU is present):
 
