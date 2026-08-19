@@ -65,6 +65,7 @@ fixed cost on both sides.
 | Qwen3-32B (TP2) | 2560t prefix, 20 reqs | 1.05 s | 0.66 s | **1.6× TTFT** | all L1 hits after the first |
 | Qwen3-32B (TP2) | 8192t exact repeat (tcp) | 2.10 s | 1.86 s | 1.1× | 29/29 chunks hit |
 | Qwen3-32B (TP2) | 8192t exact repeat (**ipc://**) | 2.10 s | 1.42 s | 1.1× | transport −24% vs tcp |
+| Qwen3-32B (TP2) | **16384t exact repeat** | 3.56 s | 2.53 s | **1.4×** | 59/59 L1 hits, byte-identical output |
 | Qwen3-32B (TP2) | sweep 最优:chunk=256, L1=8GB | 0.82 s | 0.60 s | **1.36×** | 全矩阵 8 配置中最优 |
 
 **Optimal-config validation (Qwen3-32B TP2, chunk=256 / L1=8GB)** — all five
