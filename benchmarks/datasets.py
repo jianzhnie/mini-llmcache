@@ -13,6 +13,7 @@ The three scenarios mirror the three cache-reuse patterns worth measuring:
    e.g. a shared system prompt / document in RAG or multi-turn chat);
 3. ``no_reuse``      — distinct prompts of equal length (cold baseline).
 """
+
 from transformers import PreTrainedTokenizer
 
 PHRASE = "A field guide to the birds of North America. "
@@ -42,8 +43,7 @@ SUFFIXES = [
 ]
 
 
-def repeat_to_tokens(tok: PreTrainedTokenizer, text: str,
-                     target_tokens: int) -> str:
+def repeat_to_tokens(tok: PreTrainedTokenizer, text: str, target_tokens: int) -> str:
     """Repeat ``text`` until the encoding reaches ``target_tokens``,
     then trim to exactly that many tokens (deterministic)."""
     per = len(tok.encode(text))
@@ -52,27 +52,33 @@ def repeat_to_tokens(tok: PreTrainedTokenizer, text: str,
     return tok.decode(encoded)
 
 
-def make_exact_repeat(tok: PreTrainedTokenizer, n_chunks: int = 4,
-                      doc: str = "ships") -> dict:
+def make_exact_repeat(
+    tok: PreTrainedTokenizer, n_chunks: int = 4, doc: str = "ships"
+) -> dict:
     """One prompt of ``n_chunks`` chunks; send it twice in the benchmark."""
     prompt = repeat_to_tokens(tok, DOCUMENTS[doc], n_chunks * CHUNK_TOKENS)
     return {"prompts": [prompt], "tokens": n_chunks * CHUNK_TOKENS}
 
 
-def make_shared_prefix(tok: PreTrainedTokenizer, prefix_chunks: int = 8,
-                       n_suffixes: int = 4, doc: str = "birds") -> dict:
+def make_shared_prefix(
+    tok: PreTrainedTokenizer,
+    prefix_chunks: int = 8,
+    n_suffixes: int = 4,
+    doc: str = "birds",
+) -> dict:
     """A common prefix plus ``n_suffixes`` different tails.
 
     Returns the prefix, the prompts (prefix + each suffix), and a
     ``baseline`` prompt of the same total length built from a *different*
     document (never cached, used as the cold reference).
     """
-    prefix = repeat_to_tokens(tok, DOCUMENTS[doc],
-                              prefix_chunks * CHUNK_TOKENS)
+    prefix = repeat_to_tokens(tok, DOCUMENTS[doc], prefix_chunks * CHUNK_TOKENS)
     prompts = [prefix + " " + s for s in SUFFIXES[:n_suffixes]]
     baseline = repeat_to_tokens(
-        tok, DOCUMENTS["rocks"],
-        prefix_chunks * CHUNK_TOKENS + len(tok.encode(SUFFIXES[0])))
+        tok,
+        DOCUMENTS["rocks"],
+        prefix_chunks * CHUNK_TOKENS + len(tok.encode(SUFFIXES[0])),
+    )
     return {
         "prefix": prefix,
         "prompts": prompts,
@@ -81,12 +87,15 @@ def make_shared_prefix(tok: PreTrainedTokenizer, prefix_chunks: int = 8,
     }
 
 
-def make_no_reuse(tok: PreTrainedTokenizer, n_chunks: int = 4,
-                  n_prompts: int = 4,
-                  docs: tuple[str, ...] = ("fungi", "rocks", "ships",
-                                           "weather")) -> dict:
+def make_no_reuse(
+    tok: PreTrainedTokenizer,
+    n_chunks: int = 4,
+    n_prompts: int = 4,
+    docs: tuple[str, ...] = ("fungi", "rocks", "ships", "weather"),
+) -> dict:
     """``n_prompts`` distinct same-length prompts (all cold)."""
-    prompts = [repeat_to_tokens(tok, DOCUMENTS[docs[i % len(docs)]],
-                                n_chunks * CHUNK_TOKENS)
-               for i in range(n_prompts)]
+    prompts = [
+        repeat_to_tokens(tok, DOCUMENTS[docs[i % len(docs)]], n_chunks * CHUNK_TOKENS)
+        for i in range(n_prompts)
+    ]
     return {"prompts": prompts, "tokens": n_chunks * CHUNK_TOKENS}

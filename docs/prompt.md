@@ -1,31 +1,108 @@
-# mini-llmcache
+# mini-llmcache 验证与性能优化任务书
 
-请帮我测试一下 mini-llmcache 是否正常工作，包括模型加载、推理、缓存等， 并提供测试结果，测试过程遇到Bug, 请自行定位并修复。
+## 1. 任务目标
 
-## 环境
+对 mini-llmcache(约 870 行的 LMCache 教学版:为 vLLM 挂载独立 KV Cache 缓存服务器,存哈希 prompt 块、命中前缀跳过 prefill)完成三件事:
 
-Docker 镜像： quay.io/ascend/vllm-ascend:v0.23.0rc1-a3  
-Docker 容器： vllm-ascend-env
-权重路径： /home/jianzhnie/llmtuner/hfhub/models/Qwen/Qwen3-0.6B
+1. **正确性检查**:模型加载 / 推理 / 缓存读写全链路是否正确(含跨重启的 L2 磁盘持久化);
+2. **基准测试**:多个模型 × 多种配置下的 **prefill 加速**,找出规律与瓶颈;
+3. **代码优化**:在保证正确性的前提下,把加速能力提到最大。
 
-## 测试 mini-llmcache
+## 2. 环境
 
-```bash
-python -m mini_llmcache.server --port 45881 --l1-size-gb 8 \
-    --l2-adapter '{"type": "fs", "base_path": "/tmp/mini-l2"}'
-```
+| 项 | 值 |
+|---|---|
+| Docker 镜像 | `quay.io/ascend/vllm-ascend:v0.23.0rc1-a3` |
+| Docker 容器 | `vllm-ascend-env`(工作环境:在本容器内执行一切命令) |
+| 硬件 | 3× Ascend 910(torch_npu) |
+| 模型权重 | `Qwen/Qwen3-0.6B`、`Qwen/Qwen3-8B`(单卡)、`Qwen/Qwen3-32B`(TP=2) |
+| 仓库 | `/home/jianzhnie/llmtuner/llm/mini-llmcache` |
 
-```bash
-vllm serve Qwen/Qwen3-0.6B --enforce-eager \
-    --max-model-len 4096 --no-enable-prefix-caching \
-    --kv-transfer-config '{"kv_connector": "MiniConnector",
-                           "kv_connector_module_path": "mini_llmcache.integration.vllm_connector",
-                           "kv_role": "kv_both",
-                           "kv_connector_extra_config": {"mini.port": 45881}}'
-```
+**关键坑(已踩过)**:vllm-ascend 镜像的 `$PYTHONPATH` 自带 CANN `acl` 模块,启动任何 python/vllm 进程必须 `PYTHONPATH=repo:$PYTHONPATH` **前置追加**,否则报 `No module named 'acl'`。
 
-```bash
-curl -s http://localhost:8000/v1/completions -H 'Content-Type: application/json' -d "{
-    \"model\": \"Qwen/Qwen3-0.6B\", \"temperature\": 0, \"max_tokens\": 24,
-    \"prompt\": \"$(python3 -c "print('A field guide to the birds of North America. ' * 80)")\"}"
-```
+## 3. 正确性检查(验收标准)
+
+| 检查项 | 标准 | 手段 |
+|---|---|---|
+| 模型加载 | vllm 启动成功,server 打印 `REGISTER ... (chunk=.. MiB, N engines)` | 日志 |
+| 推理正确 | HTTP 200,输出合理 | curl |
+| 缓存写入 | 第一遍请求后 server 打 `STORE tokens [...]` | 日志 |
+| 缓存命中 | 第二遍同 prompt:server 打 `RETRIEVE hit L1=N`,且**输出与冷启动逐字节一致** | 日志 + 输出比对 |
+| L2 持久化 | 杀掉 server+vllm、重启后再次请求:`RETRIEVE hit L1=0 L2=N`,延迟≈热命中 | 日志 + 计时 |
+| 单元测试 | `python -m pytest tests/` 全绿(当前 50 个) | pytest |
+
+## 4. 基准测试
+
+### 4.1 指标与口径
+
+- **TTFT**(首 token 延迟)为主指标——缓存加速的是 prefill,decode 是两边固定成本;用流式请求测
+- **吞吐加速**(共享前缀场景):总墙钟 = 无缓存预估 / 实际;decode 固定成本会把 TTFT 加速稀释,两者都要报
+- 加速比 = 冷启动 / 命中;**每次跑之前清空 server 与 L2**(`rm -rf /tmp/mini-l2`),否则"冷启动"其实命中磁盘
+- 先发一个短 prompt 做模型 warmup(首次 NPU prefill 慢 30~40 倍,不计入)
+- 温度 0 保证输出确定性,可逐字节比对
+
+### 4.2 数据集(已实现于 `benchmarks/`)
+
+| 场景 | 构造 | 测什么 |
+|---|---|---|
+| 1 完全重复 | 同一长 prompt ×2 | 全命中加速、输出一致性 |
+| 2 共享前缀 | 1 长前缀 + 4 不同后缀 | 部分命中(前缀)加速 |
+| 3 无复用 | 4 条不同等长 prompt | 冷启动基线 |
+| 4 SQuAD 式 100 条 | 20 上下文 × 5 问(优先 HF 下载,离线则本地构造) | 真实问答形态的命中率与吞吐 |
+| 5 吞吐 | N 条请求共享同一前缀 | 前缀复用场景的总吞吐加速 |
+
+### 4.3 配置矩阵
+
+| 维度 | 取值 |
+|---|---|
+| 模型 | 0.6B / 8B / 32B(TP=2, TP=4, TP=8) |
+| chunk-size | 64 / 128 / 256 / 512 / 1024 |
+| L1 大小 | 4 / 8 / 16 / 32 GB |
+| L2 大小 | 4 / 8 / 16 / 32 GB / 64 GB / 128 GB |
+| prompt 长度 | 1024 / 2048 / 4096 / 8192 / 16384 / 32768 token |
+
+脚本:`benchmarks/bench.py`(单配置场景选择)、`benchmarks/sweep.py`(自动扫 chunk×L1)、`benchmarks/probe.py`(直连服务器测 LOOKUP/RETRIEVE 裸耗时)。
+
+### 4.4 已测数据与瓶颈分析(截至 2026-08-19)
+
+| 模型 | 场景 | 冷 TTFT | 热 TTFT | 加速 | 关键证据 |
+|---|---|---|---|---|---|
+| 0.6B | 完全重复 3072t | 0.41s | 0.53s | 0.8× | 命中 11/11,输出一致;100 条命中率 100% 但 TTFT 合计 0.8× |
+| 8B | 完全重复 3072t | 0.63s | 0.74s | 0.9× | 命中 11/11,输出一致 |
+| 32B(TP2) | 完全重复 3072t | 0.80s | 0.81s | 1.0× | 命中 10-11/11,输出一致 |
+| 32B(TP2) | 吞吐(20× 共享前缀) | 3.04s(总) | — | 1.0× | 全部命中但全部走 **L2**(临时条目用完即弃) |
+| 32B 探针 | LOOKUP resolve | 0.4ms(L1 热)/ 106ms(L2) | | | |
+| 32B 探针 | RETRIEVE 336MB 往返 | 290ms → 251ms(调 SNDBUF/RCVBUF) | | | 零拷贝直发已实现,待复测 |
+
+**瓶颈定位(按影响排序)**:
+
+1. **预取临时条目"用完即弃"**:从 L2 拉出的块在 RETRIEVE 后立即释放,导致共享前缀的**每个**请求都重新走一遍 L2→L1(320MB ≈ 45ms)——这是吞吐场景上不去的直接原因。**修复:RETRIEVE 消费后转常驻(升为 L1 驻留,由 LRU 淘汰)**
+2. **TTFT 被 decode 稀释**:32B 单 token decode ≈ 125ms,首 token 前的固定成本吃掉 prefill 节省;长 prompt(≥8K token)或吞吐口径才能放大收益
+3. **warm 路径串行**:LOOKUP(轮询)→ RETRIEVE(传输)→ H2D 回填 → 才跑后缀 prefill,vLLM 等待期间无计算重叠
+4. 小模型 prefill 太便宜(0.6B 3072t ≈ 0.35s),传输开销与之同量级
+
+### 4.5 优化进度
+
+| 项 | 状态 |
+|---|---|
+| ZMQ SNDBUF/RCVBUF 128MB 调优 | ✅ 已提交 |
+| RETRIEVE 零拷贝直发(memoryview + post_send,读锁内同步发) | ✅ 已实现,待复测 |
+| 预取临时条目消费后转常驻 | ⬜ **下一步(最高价值)** |
+| probe 修复(END_SESSION 顺序、world-size 兼容) | ✅ 已提交 |
+| sweep 修复(先起 server 再起 vllm、逐配置双重启) | ✅ 已提交,待跑通全矩阵 |
+
+## 5. 优化任务(按价值排序)
+
+1. **临时条目转常驻**:预取从 L2 拉出的块被 RETRIEVE 消费后保留在 L1(而非用完即弃)——第 2+ 个共享前缀请求直接 L1 命中;LRU 与水位线负责淘汰,容量安全
+2. **降低传输开销**:零拷贝直发已落地;继续排查 pickle 头、ZMQ 帧数
+3. **流水线重叠**:RETRIEVE 的 H2D 回填与未命中部分的 prefill 并行(需改 connector 与 vLLM 协作时序,风险较高,最后做)
+4. **chunk-size 扫描**:128/256/512/1024 × 长 prompt,找传输量与命中粒度的最优平衡
+
+每步优化后:50 个 pytest 全绿 + 干净环境重跑基准,输出**可复现的加速数据**。
+
+## 6. 交付物
+
+- 正确性检查结果(含输出一致性证据)
+- 基准报告:模型 × 配置矩阵的 TTFT/吞吐与加速表、瓶颈分析
+- 代码优化 diff + 前后对比数据
+- 更新 README(中英)实测成绩单与基准章节

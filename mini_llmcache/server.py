@@ -180,19 +180,26 @@ class CacheServer:
         else:
             l1_keys, l2_keys, l2_gbps = resolved
         objs = self.sm.l1.read(keys)
-        # Copy to bytes while the read locks are still held: the frames are
-        # sent from the ZMQ I/O thread *after* release, so a zero-copy
-        # memoryview could outlive a freed temporary entry.
-        chunks = [bytes(obj.byte_array) for obj in objs]
-        self.sm.prefetch.release(payload.request_id, keys)
+        # Zero-copy: return memoryviews plus a post-send callback.  The ZMQ
+        # handler thread sends them synchronously WHILE the read locks are
+        # still held (safe for temporary entries), then calls the callback
+        # to release the locks.  See MQServer.handle.
+        chunks = [obj.byte_array for obj in objs]
         world_size = instance.world_size
+
+        def post_send() -> None:
+            # Keep the consumed prefetch chunks resident: the next request
+            # sharing this prefix hits L1 directly instead of L2.
+            self.sm.l1.promote(keys)
+            self.sm.prefetch.release(payload.request_id, keys)
+
         print(
             f"RETRIEVE rid={payload.request_id} tokens [{op.start}, {op.end}) "
             f"hit L1={l1_keys // world_size} L2={l2_keys // world_size} | "
             f"L2->L1 {l2_gbps:.1f} GB/s | {len(chunks)} chunks sent",
             flush=True,
         )
-        return chunks
+        return chunks, post_send
 
     def ack(self, payload: AckPayload) -> bool:
         gbps = payload.nbytes / payload.elapsed / 1e9 if payload.elapsed > 0 else 0.0

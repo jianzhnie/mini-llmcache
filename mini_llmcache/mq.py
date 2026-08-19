@@ -20,6 +20,19 @@ import zmq
 
 from mini_llmcache.protocol import Req
 
+#: Large chunk payloads dominate traffic; default kernel socket buffers
+#: (~hundreds of KB) throttle loopback throughput with copy/backpressure
+#: stalls.  These caps are per direction.
+SNDBUF = 128 * (1 << 20)
+RCVBUF = 128 * (1 << 20)
+
+
+def _tune(sock: zmq.Socket) -> zmq.Socket:
+    # (libzmq already enables TCP_NODELAY by default.)
+    sock.setsockopt(zmq.SNDBUF, SNDBUF)
+    sock.setsockopt(zmq.RCVBUF, RCVBUF)
+    return sock
+
 
 class SocketLoop:
     """Single-threaded event loop over one ZMQ socket + one wakeup pipe."""
@@ -30,6 +43,9 @@ class SocketLoop:
         self.wake_read, self.wake_write = os.pipe()
         self.stopped = False
         self.thread = threading.Thread(target=self.run, daemon=True)
+        #: Guards direct sends (see ``send_now``); zmq sockets are not
+        #: thread-safe when two threads write at once.
+        self.send_lock = threading.Lock()
 
     def start(self) -> None:
         self.thread.start()
@@ -38,6 +54,17 @@ class SocketLoop:
         """Queue ``frames`` for delivery from the I/O thread."""
         self.send_queue.put(frames)
         os.write(self.wake_write, b"x")
+
+    def send_now(self, frames: list[bytes]) -> None:
+        """Send ``frames`` synchronously from the calling thread.
+
+        Used by the server for large RETRIEVE payloads: the handler thread
+        still holds the L1 read locks while sending, so zero-copy
+        memoryview frames are safe (the I/O-thread queue would send them
+        after release, racing a freed temporary entry).
+        """
+        with self.send_lock:
+            self.sock.send_multipart(frames)
 
     def close(self) -> None:
         self.stopped = True
@@ -56,7 +83,8 @@ class SocketLoop:
             if self.wake_read in ready:
                 os.read(self.wake_read, 4096)
                 while not self.send_queue.empty():
-                    self.sock.send_multipart(self.send_queue.get())
+                    with self.send_lock:
+                        self.sock.send_multipart(self.send_queue.get())
             if self.sock in ready:
                 self.on_recv(self.sock.recv_multipart())
 
@@ -68,7 +96,7 @@ class MQClient(SocketLoop):
     """Dealer-side RPC client; ``call`` blocks for the reply."""
 
     def __init__(self, server_url: str):
-        sock = zmq.Context.instance().socket(zmq.DEALER)
+        sock = _tune(zmq.Context.instance().socket(zmq.DEALER))
         sock.connect(server_url)
         super().__init__(sock)
         self.uid_counter = itertools.count()
@@ -108,7 +136,7 @@ class MQServer(SocketLoop):
     """Router-side RPC server; each request is handled in its own thread."""
 
     def __init__(self, bind_url: str):
-        sock = zmq.Context.instance().socket(zmq.ROUTER)
+        sock = _tune(zmq.Context.instance().socket(zmq.ROUTER))
         sock.bind(bind_url)
         super().__init__(sock)
         self.handlers: dict[Req, Callable] = {}
@@ -123,27 +151,35 @@ class MQServer(SocketLoop):
     def handle(self, identity: bytes, blob: bytes) -> None:
         """Run the handler and ship back ``(uid, ok, result-or-exception)``.
 
-        A ``list[bytes]`` result (RETRIEVE chunks) travels as separate ZMQ
-        frames so the hot path avoids pickling hundreds of megabytes.
+        A result of ``(chunks, post_send)`` (RETRIEVE) is sent synchronously
+        as separate ZMQ frames: the handler thread still holds the L1 read
+        locks, so zero-copy memoryview frames are safe, and ``post_send()``
+        releases them after the send completes.
         """
         uid = None
         try:
             uid, req, payload = pickle.loads(blob)
             result = self.handlers[req](payload)
-            if _is_chunk_list(result):
+            if _is_chunk_result(result):
+                chunks, post_send = result
                 frames = [identity, pickle.dumps((uid, True, None))]
-                frames.extend(result)
+                frames.extend(chunks)
+                self.send_now(frames)
+                post_send()
             else:
                 frames = [identity, pickle.dumps((uid, True, result))]
-            self.send(frames)
+                self.send(frames)
         except Exception as exc:
             self.send([identity, pickle.dumps((uid, False, exc))])
 
 
-def _is_chunk_list(result: Any) -> bool:
-    # bytes or memoryview (both satisfy the buffer protocol ZMQ needs).
+def _is_chunk_result(result: Any) -> bool:
+    # (list_of_bytes_or_memoryview, post_send_callable)
     return (
-        isinstance(result, list)
-        and bool(result)
-        and all(isinstance(x, bytes | memoryview) for x in result)
+        isinstance(result, tuple)
+        and len(result) == 2
+        and isinstance(result[0], list)
+        and bool(result[0])
+        and all(isinstance(x, bytes | memoryview) for x in result[0])
+        and callable(result[1])
     )

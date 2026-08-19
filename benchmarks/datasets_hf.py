@@ -8,6 +8,7 @@ contexts, 5 questions each = 100 prompts.  Every question about the same
 context shares that context's chunks, which is exactly the reuse pattern
 a prefix cache exploits.
 """
+
 import logging
 
 from transformers import PreTrainedTokenizer
@@ -28,12 +29,12 @@ N_QUESTIONS = 5
 def _download_squad() -> list[dict] | None:
     """Try to pull squad validation from the Hugging Face hub."""
     try:
-        import datasets  # noqa: F401
+        import datasets
     except ImportError:
         return None
     try:
         ds = datasets.load_dataset("squad", split="validation")
-    except Exception as exc:  # noqa: BLE001 — network/air-gap
+    except Exception as exc:
         logger.warning("squad download failed (%s); constructing locally", exc)
         return None
     rows = [r for r in ds if len(r["context"]) > 200][:N_CONTEXTS]
@@ -72,7 +73,7 @@ def load_100(tok: PreTrainedTokenizer) -> tuple[list[str], list[int]]:
     cold run, the rest hit the context prefix.
     """
     rows = _download_squad() or _construct_local(tok)
-    rows = rows[:N_CONTEXTS * N_QUESTIONS]
+    rows = rows[: N_CONTEXTS * N_QUESTIONS]
     prompts, group_ids = [], []
     for gid, row in enumerate(rows):
         prompts.append(f"Context: {row['context']}\n\n{row['question']}")

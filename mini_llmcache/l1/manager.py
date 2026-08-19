@@ -155,6 +155,20 @@ class L1Manager:
             if freed:
                 self.notify("on_removed", freed)
 
+    def promote(self, keys: list[ChunkKey]) -> None:
+        """Turn temporary (prefetch) entries into resident cache entries.
+
+        Called after a RETRIEVE has consumed the chunk: keeping it in L1
+        lets the next request sharing the same prefix hit L1 directly
+        instead of re-loading it from L2.  The LRU evictor still bounds
+        resident usage.
+        """
+        with self.lock:
+            for key in keys:
+                entry = self.entries.get(key)
+                if entry is not None:
+                    entry.is_temporary = False
+
     def is_evictable(self, key: ChunkKey) -> bool:
         entry = self.entries.get(key)
         return entry is not None and entry.unlocked()
