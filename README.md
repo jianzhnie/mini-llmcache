@@ -67,6 +67,19 @@ fixed cost on both sides.
 | Qwen3-32B (TP2) | 8192t exact repeat (**ipc://**) | 2.10 s | 1.42 s | 1.1× | transport −24% vs tcp |
 | Qwen3-32B (TP2) | sweep 最优:chunk=256, L1=8GB | 0.82 s | 0.60 s | **1.36×** | 全矩阵 8 配置中最优 |
 
+**Optimal-config validation (Qwen3-32B TP2, chunk=256 / L1=8GB)** — all five
+benchmark scenarios on a fresh server:
+
+| Scenario | Cold TTFT | Hot TTFT | Speedup | Evidence |
+|---|---|---|---|---|
+| Exact repeat 3072t | 0.633 s | 0.585 s | 1.1× | 11/11 L1 hits, byte-identical output |
+| Shared prefix 3072t | 0.597 s | 0.526 s | 1.1× | 10/10 L1 hits |
+| No reuse (baseline) | 0.570 s | — | — | cold reference |
+| 100 SQuAD-style (1KB contexts) | 0.202 s | 0.298 s | 0.72× | 80/80 (100%) hits; short-context transfer dominates |
+| Throughput, 20 shared-prefix reqs | 0.986 s | 0.60 s | **1.6× TTFT / 1.2× wall** | all L1 hits |
+
+Speedup grows with prefix length and is largest in batch shared-prefix serving.
+
 **Why small models show ~1×**: prefill on a 0.6B/8B model is very cheap, so the
 cache path's fixed costs (transfer + H2D scatter, ~0.2–0.4 s) cancel the
 savings. The cache wins where prefill dominates: cold starts (19.4×),
