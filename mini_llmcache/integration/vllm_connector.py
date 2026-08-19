@@ -140,7 +140,9 @@ class MiniConnector(KVConnectorBase_V1):
             tracker = RequestTracker(request.all_token_ids)
             self.trackers[request.request_id] = tracker
             prompt = request.prompt_token_ids
-            num_lookup = (len(prompt) - 1) // self.chunk_size * self.chunk_size
+            # Whole chunks only; chunk_hashes ignores a trailing partial
+            # chunk anyway, so no need to drop one here.
+            num_lookup = len(prompt) // self.chunk_size * self.chunk_size
             self.client.submit(Req.LOOKUP, LookupPayload(
                 request.request_id, prompt[:num_lookup],
                 self.model, self.world_size))

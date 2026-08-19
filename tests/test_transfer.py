@@ -88,3 +88,25 @@ def test_to_host_requires_whole_chunks():
     transfer, _ = make_transfer()
     with pytest.raises(AssertionError):
         transfer.to_host([0, 1, 2])  # 3 blocks: not a multiple of 2
+
+
+def test_to_host_preserves_chunk_order_with_many_chunks():
+    """Regression test: >3 chunks must not get scrambled by the rotating
+    staging buffers (each chunk's bytes are extracted on its own)."""
+    transfer, kv_caches = make_transfer(num_blocks=8)
+    for b in range(8):
+        for layer, kv in enumerate(kv_caches):
+            kv[b].fill_(float(b))
+    chunks, _ = transfer.to_host(list(range(8)))  # 4 chunks
+    assert len(chunks) == 4
+    # Each chunk carries two blocks of one distinct value; the first half of
+    # the bytes is layer 0, the second half layer 1 (both hold the same two
+    # blocks: values 2i and 2i+1, 12 float16 elements per block).
+    for i, chunk in enumerate(chunks):
+        half = transfer.chunk_nbytes // 2
+        first = torch.frombuffer(chunk[:half], dtype=torch.float16)
+        second = torch.frombuffer(chunk[half:], dtype=torch.float16)
+        assert first[0].item() == pytest.approx(float(2 * i))
+        assert first[12].item() == pytest.approx(float(2 * i + 1))
+        assert second[0].item() == pytest.approx(float(2 * i))
+        assert second[12].item() == pytest.approx(float(2 * i + 1))

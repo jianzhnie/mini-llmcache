@@ -106,6 +106,7 @@ class KVTransfer:
             device_module.synchronize()
             begin = device_module.Event(enable_timing=True)
             begin.record(pipe.kernel_stream)
+            chunks = []
             for i in range(n_chunks):
                 buf = i % 3
                 ids = block_ids_t[i * self.blocks_per_chunk:
@@ -121,11 +122,12 @@ class KVTransfer:
                     pipe.cpu_bufs[buf].copy_(pipe.staging[buf],
                                              non_blocking=True)
                     pipe.free[buf].record(pipe.copy_stream)
+                # Extract THIS chunk's bytes before the slot is reused for
+                # chunk i+3 (free[buf] fires when this copy completes).
+                pipe.free[buf].synchronize()
+                chunks.append(pipe.cpu_bufs[buf].numpy().tobytes())
             end = device_module.Event(enable_timing=True)
             end.record(pipe.copy_stream)
-            pipe.copy_stream.synchronize()
-            chunks = [pipe.cpu_bufs[i % 3].numpy().tobytes()
-                      for i in range(n_chunks)]
         return chunks, begin.elapsed_time(end) / 1e3
 
     def from_host(self, chunks: list[bytes], block_ids: list[int],

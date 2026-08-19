@@ -91,6 +91,9 @@ class MQClient(SocketLoop):
 
     def on_recv(self, frames: list[bytes]) -> None:
         uid, ok, value = pickle.loads(frames[0])
+        if ok and value is None and len(frames) > 1:
+            # Large byte payloads arrive as separate frames (see MQServer).
+            value = [bytes(f) for f in frames[1:]]
         fut = self.pending.pop(uid, None)
         if fut is None:
             return  # unknown/stale reply — ignore
@@ -118,12 +121,25 @@ class MQServer(SocketLoop):
                          daemon=True).start()
 
     def handle(self, identity: bytes, blob: bytes) -> None:
-        """Run the handler and ship back ``(uid, ok, result-or-exception)``."""
+        """Run the handler and ship back ``(uid, ok, result-or-exception)``.
+
+        A ``list[bytes]`` result (RETRIEVE chunks) travels as separate ZMQ
+        frames so the hot path avoids pickling hundreds of megabytes.
+        """
         uid = None
         try:
             uid, req, payload = pickle.loads(blob)
             result = self.handlers[req](payload)
-            reply = pickle.dumps((uid, True, result))
+            if _is_chunk_list(result):
+                frames = [identity, pickle.dumps((uid, True, None))]
+                frames.extend(result)
+            else:
+                frames = [identity, pickle.dumps((uid, True, result))]
+            self.send(frames)
         except Exception as exc:  # noqa: BLE001 — surfaced to the client
-            reply = pickle.dumps((uid, False, exc))
-        self.send([identity, reply])
+            self.send([identity, pickle.dumps((uid, False, exc))])
+
+
+def _is_chunk_list(result: Any) -> bool:
+    return (isinstance(result, list) and bool(result)
+            and all(isinstance(x, bytes) for x in result))

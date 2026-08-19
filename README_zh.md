@@ -58,6 +58,26 @@ RETRIEVE rid=cmpl-... tokens [0, 768) hit L1=3 L2=0 | 3 chunks ← 第二遍:直
 | 热命中(L1) | **0.93 s** | 命中 3/3 chunk,prefill 完全跳过,**加速 19.4×** |
 | 全量重启后(L2 磁盘) | 0.97 s | 从磁盘预取回 L1 再回填 GPU(L2→L1 4.5 GB/s) |
 
+## 基准测试
+
+`benchmarks/` 提供可复现的四场景基准(数据集构造器 + 流式客户端,测 **TTFT**(首 token 延迟)——缓存真正加速的部分)。对着运行中的服务、用**全新的 cache server** 跑:
+
+```bash
+python benchmarks/bench.py --url http://localhost:8000 --model Qwen/Qwen3-0.6B \
+    --tokenizer /path/to/model/dir --server-log /tmp/mini-server.log
+```
+
+Ascend 910 + Qwen3-0.6B 实测(3072 token prompt):
+
+| 场景 | 冷启动 TTFT | 命中 TTFT | 加速 | 说明 |
+|---|---|---|---|---|
+| 完全重复(12 chunks) | 0.413 s | 0.527 s | 0.8× | 11/11 命中,输出与冷启动**逐字节一致** |
+| 共享前缀(12 chunks + 4 后缀) | 0.344 s | 0.369 s | 0.9× | 前缀命中,只算后缀 |
+| 无复用(4 条不同 prompt) | 0.347 s 平均 | — | — | 冷启动基线 |
+| 100 条 SQuAD 式数据(20 上下文 × 5 问) | 0.132 s 平均 | 0.147 s 平均 | TTFT ~0.9× | **80/80(100%)前缀命中** |
+
+**为什么小模型下命中 ≈ 重算**:0.6B 模型的 prefill 非常便宜(3072 token 约 0.35s),缓存路径的固有开销(chunk 序列化 + ZMQ 传输 + H2D 回填,约 0.2-0.4s)几乎抵消了收益。缓存真正的用武之地:① 冷启动加速(上表 19.4×)② 跨重启的磁盘持久复用 ③ 更大的模型——prefill 成本随模型规模增长,而传输成本只随 KV 字节数增长。
+
 ## 文档导航
 
 | 文档 | 内容 |
