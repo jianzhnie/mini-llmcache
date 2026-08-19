@@ -68,7 +68,7 @@ Ascend 910 端到端(全新 server、模型 warmup 后)。TTFT = 首 token 延�
 
 ## 基准测试
 
-`benchmarks/` 提供可复现的四场景基准(数据集构造器 + 流式客户端,测 **TTFT**(首 token 延迟)——缓存真正加速的部分)。对着运行中的服务、用**全新的 cache server** 跑:
+`benchmarks/` 提供可复现的五场景基准(数据集构造器 + 流式客户端,测 **TTFT**(首 token 延迟)——缓存真正加速的部分)。对着运行中的服务、用**全新的 cache server** 跑:
 
 ```bash
 python benchmarks/bench.py --url http://localhost:8000 --model Qwen/Qwen3-0.6B \
@@ -95,7 +95,7 @@ Ascend 910 + Qwen3-0.6B 实测(3072 token prompt):
 
 ## 测试
 
-49 个 pytest 用例覆盖:哈希、内存池、L1 锁协议、LRU、L2 adapter、ZMQ RPC(含异常回传)、预取编排、
+50 个 pytest 用例覆盖:哈希、内存池、L1 锁协议、LRU、L2 adapter、ZMQ RPC(含异常回传)、预取编排、
 服务器全流程往返,以及设备门控的 GPU⇄CPU 搬运往返测试(有 GPU/NPU 时运行):
 
 ```bash
