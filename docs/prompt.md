@@ -85,11 +85,23 @@
 
 | 项 | 状态 |
 |---|---|
-| ZMQ SNDBUF/RCVBUF 128MB 调优 | ✅ 已提交 |
-| RETRIEVE 零拷贝直发(memoryview + post_send,读锁内同步发) | ✅ 已实现,待复测 |
-| 预取临时条目消费后转常驻 | ⬜ **下一步(最高价值)** |
+| ZMQ SNDBUF/RCVBUF 128MB 调优 | ✅ 已提交(336MB RETRIEVE 290ms→251ms) |
+| RETRIEVE 零拷贝直发(memoryview + post_send,读锁内同步发) | ✅ 已实现并验证 |
+| 预取临时条目消费后转常驻(promote) | ✅ 已实现:32B 吞吐场景 1.0×→**1.6× TTFT** |
+| ipc:// 传输支持(--bind-url / mini.url) | ✅ 已提交:8192t 场景传输段 **−24%** |
 | probe 修复(END_SESSION 顺序、world-size 兼容) | ✅ 已提交 |
-| sweep 修复(先起 server 再起 vllm、逐配置双重启) | ✅ 已提交,待跑通全矩阵 |
+| sweep 修复(先起 server 再起 vllm、逐配置双重启、TTFT 口径、-u 无缓冲) | ✅ 已提交,**8B 全矩阵运行中** |
+
+**8B 全矩阵初步结果(chunk × L1,TTFT 口径,进行中)**:
+
+| chunk | L1=4GB | L1=8GB | L1=16GB |
+|---|---|---|---|
+| 128 | 0.91× | 0.98× | 0.86× |
+| 256 | 0.95× | 0.93× | 0.95× |
+| 512 | 运行中 | | |
+| 1024 | | | |
+
+> 注:chunk-size 必须 ≥128 且为 128 的倍数(vllm-ascend block_size=128);64 不可行。
 
 ## 5. 优化任务(按价值排序)
 
