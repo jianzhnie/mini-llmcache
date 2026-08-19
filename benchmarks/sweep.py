@@ -70,20 +70,24 @@ def start_server(chunk_size: int, l1_gb: float) -> None:
     raise RuntimeError("cache server failed to start")
 
 
-def start_vllm(model_path: str, served_name: str) -> None:
+def start_vllm(model_path: str, served_name: str,
+                tensor_parallel_size: int = 1, max_model_len: int = 4096) -> None:
     subprocess.run(["pkill", "-f", "vllm serv[e]"], check=False)
     time.sleep(2)
+    cmd = ["vllm", "serve", model_path, "--served-model-name", served_name,
+           "--enforce-eager", "--max-model-len", str(max_model_len),
+           "--no-enable-prefix-caching"]
+    if tensor_parallel_size > 1:
+        cmd += ["--tensor-parallel-size", str(tensor_parallel_size)]
+    cmd += ["--kv-transfer-config",
+            ('{"kv_connector": "MiniConnector", "kv_connector_module_path": '
+             '"mini_llmcache.integration.vllm_connector", "kv_role": '
+             '"kv_both", "kv_connector_extra_config": {"mini.port": '
+             f'{CACHE_PORT}}}}}'),
+            "--port", str(PORT)]
     with open(VLLM_LOG, "w") as out:
-        subprocess.Popen(
-            ["vllm", "serve", model_path, "--served-model-name", served_name,
-             "--enforce-eager", "--max-model-len", "4096",
-             "--no-enable-prefix-caching", "--kv-transfer-config",
-             ('{"kv_connector": "MiniConnector", "kv_connector_module_path": '
-              '"mini_llmcache.integration.vllm_connector", "kv_role": '
-              '"kv_both", "kv_connector_extra_config": {"mini.port": '
-              f'{CACHE_PORT}}}}}'),
-             "--port", str(PORT)],
-            cwd=REPO, env=env(), stdout=out, stderr=subprocess.STDOUT)
+        subprocess.Popen(cmd, cwd=REPO, env=env(), stdout=out,
+                         stderr=subprocess.STDOUT)
     for _ in range(600):
         with open(VLLM_LOG) as f:
             log = f.read()
@@ -102,21 +106,24 @@ def measure(served_name: str, tok, model: str) -> dict:
 
     url = f"http://localhost:{PORT}"
     complete(url, served_name, "Hello. ")  # one-time warmup
-    _, cold_total, _ = complete(url, served_name, cold_prompt)
+    cold_ttft, cold_total, _ = complete(url, served_name, cold_prompt)
 
-    warm_times = []
-    for i in range(N_WARM):
+    # First request computes and caches the prefix; the rest replay it.
+    complete(url, served_name, prefix + " Question number 0. Answer:")
+    warm_ttfts, warm_totals = [], []
+    for i in range(1, N_WARM):
         prompt = prefix + f" Question number {i}. Answer:"
-        _, total, _ = complete(url, served_name, prompt)
-        warm_times.append(total)
-    warm_avg = sum(warm_times) / len(warm_times)
-    # The first warm request computed the prefix (cold); drop it.
+        ttft, total, _ = complete(url, served_name, prompt)
+        warm_ttfts.append(ttft)
+        warm_totals.append(total)
+    warm_avg_ttft = sum(warm_ttfts) / len(warm_ttfts)
+    warm_avg_total = sum(warm_totals) / len(warm_totals)
     return {
-        "cold_total": cold_total,
-        "warm_avg": warm_avg,
-        "warm_median": sorted(warm_times[1:])[len(warm_times[1:]) // 2]
-        if len(warm_times) > 1 else warm_avg,
-        "speedup": cold_total / warm_avg,
+        "cold_ttft": cold_ttft,
+        "warm_avg_ttft": warm_avg_ttft,
+        "ttft_speedup": cold_ttft / warm_avg_ttft,
+        "warm_avg_total": warm_avg_total,
+        "total_speedup": cold_total / warm_avg_total,
     }
 
 
@@ -127,6 +134,8 @@ def main() -> None:
     parser.add_argument("--tokenizer", required=True)
     parser.add_argument("--chunk-sizes", default="128,256,512,1024")
     parser.add_argument("--l1-gbs", default="8")
+    parser.add_argument("--tensor-parallel-size", type=int, default=1)
+    parser.add_argument("--max-model-len", type=int, default=4096)
     args: Any = parser.parse_args()
 
     tok = AutoTokenizer.from_pretrained(args.tokenizer)
@@ -135,8 +144,8 @@ def main() -> None:
 
     stop_all()
     rows = []
-    print(f"{'chunk':>6} {'L1(GB)':>6} {'cold(s)':>8} {'warm_avg(s)':>11} "
-          f"{'speedup':>8}")
+    print(f"{'chunk':>6} {'L1(GB)':>6} {'cold_ttft':>10} "
+          f"{'warm_ttft':>10} {'TTFT_x':>7} {'warm_total':>10}")
     try:
         for chunk in chunk_sizes:
             for l1 in l1_gbs:
@@ -145,20 +154,23 @@ def main() -> None:
                 # Both restart per config (a new server has no REGISTER
                 # state, which a running vLLM cannot re-send).
                 start_server(chunk, l1)
-                start_vllm(args.model_path, args.served_name)
+                start_vllm(args.model_path, args.served_name,
+                           args.tensor_parallel_size, args.max_model_len)
                 row = measure(args.served_name, tok, args.model_path)
                 row.update(chunk=chunk, l1_gb=l1)
                 rows.append(row)
-                print(f"{chunk:>6} {l1:>6} {row['cold_total']:>8.3f} "
-                      f"{row['warm_avg']:>11.3f} {row['speedup']:>7.2f}x")
+                print(f"{chunk:>6} {l1:>6} {row['cold_ttft']:>10.3f} "
+                      f"{row['warm_avg_ttft']:>10.3f} "
+                      f"{row['ttft_speedup']:>6.2f}x "
+                      f"{row['warm_avg_total']:>10.3f}")
                 subprocess.run(["pkill", "-f", "vllm serv[e]"], check=False)
                 time.sleep(2)
     finally:
         stop_all()
 
-    best = max(rows, key=lambda r: r["speedup"])
-    print(f"\n最佳配置: chunk-size={best['chunk']}, L1={best['l1_gb']}GB "
-          f"(加速 {best['speedup']:.2f}x)")
+    best = max(rows, key=lambda r: r["ttft_speedup"])
+    print(f"\n最佳配置(TTFT): chunk-size={best['chunk']}, L1={best['l1_gb']}GB "
+          f"(加速 {best['ttft_speedup']:.2f}x)")
 
 
 if __name__ == "__main__":
