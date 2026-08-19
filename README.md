@@ -52,13 +52,26 @@ RETRIEVE rid=cmpl-... tokens [0, 768) hit L1=3 L2=0 | 3 chunks ← 2nd call: rep
 
 ## Measured Results
 
-End-to-end on Ascend 910 + Qwen3-0.6B (fresh server, model warmed up first):
+End-to-end on Ascend 910 (fresh server, model warmed up first). TTFT = time to
+first token — the part the cache accelerates (prefill + transfer); decode is a
+fixed cost on both sides.
 
-| Scenario | Latency | Notes |
-|---|---|---|
-| Cold (first request) | 18.07 s | prefill 768 tokens + 24 output tokens, plus STORE |
-| Warm L1 hit | **0.93 s** | 3/3 chunks hit, prefill fully skipped — **19.4× speedup** |
-| After full restart (L2 disk) | 0.97 s | chunks prefetched from disk back to L1 (L2→L1 4.5 GB/s) |
+| Model | Scenario | Cold TTFT | Warm TTFT | Speedup | Notes |
+|---|---|---|---|---|---|
+| Qwen3-0.6B | cold start → warm hit (768t) | 18.07 s | **0.93 s** | **19.4×** | prefill fully skipped |
+| Qwen3-0.6B | L2 persistence (full restart) | — | 0.97 s | — | chunks prefetched from disk (L2→L1 4.5 GB/s) |
+| Qwen3-0.6B | 3072t exact repeat | 0.41 s | 0.53 s | 0.8× | 11/11 chunks hit, byte-identical output |
+| Qwen3-8B | 3072t exact repeat | 0.58 s | 0.81 s | 0.7× | 11/11 chunks hit, byte-identical output |
+| Qwen3-32B (TP2) | 2560t prefix, 20 reqs | 1.05 s | 0.66 s | **1.6× TTFT** | all L1 hits after the first |
+| Qwen3-32B (TP2) | 8192t exact repeat (tcp) | 2.10 s | 1.86 s | 1.1× | 29/29 chunks hit |
+| Qwen3-32B (TP2) | 8192t exact repeat (**ipc://**) | 2.10 s | 1.42 s | 1.1× | transport −24% vs tcp |
+
+**Why small models show ~1×**: prefill on a 0.6B/8B model is very cheap, so the
+cache path's fixed costs (transfer + H2D scatter, ~0.2–0.4 s) cancel the
+savings. The cache wins where prefill dominates: cold starts (19.4×),
+disk-persistent reuse across restarts, shared-prefix serving on larger models
+(1.6× on 32B), and even larger models / longer prompts where prefill grows
+faster than transfer.
 
 ## Benchmarks
 
