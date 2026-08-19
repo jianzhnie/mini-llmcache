@@ -65,6 +65,7 @@ fixed cost on both sides.
 | Qwen3-32B (TP2) | 2560t prefix, 20 reqs | 1.05 s | 0.66 s | **1.6× TTFT** | all L1 hits after the first |
 | Qwen3-32B (TP2) | 8192t exact repeat (tcp) | 2.10 s | 1.86 s | 1.1× | 29/29 chunks hit |
 | Qwen3-32B (TP2) | 8192t exact repeat (**ipc://**) | 2.10 s | 1.42 s | 1.1× | transport −24% vs tcp |
+| Qwen3-32B (TP2) | sweep 最优:chunk=256, L1=8GB | 0.82 s | 0.60 s | **1.36×** | 全矩阵 8 配置中最优 |
 
 **Why small models show ~1×**: prefill on a 0.6B/8B model is very cheap, so the
 cache path's fixed costs (transfer + H2D scatter, ~0.2–0.4 s) cancel the
