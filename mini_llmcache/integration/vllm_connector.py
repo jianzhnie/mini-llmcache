@@ -73,8 +73,10 @@ class MiniConnector(KVConnectorBase_V1):
         self.vllm_config = vllm_config
         extra = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.client = MQClient(
-            "tcp://{}:{}".format(
-                extra.get("mini.host", "localhost"), extra.get("mini.port", 5555)
+            extra.get("mini.url")
+            or "tcp://{}:{}".format(
+                extra.get("mini.host", "localhost"),
+                extra.get("mini.port", 5555),
             )
         )
         # Fail fast with a clear message if the cache server is unreachable.

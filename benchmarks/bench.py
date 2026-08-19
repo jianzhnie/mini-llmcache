@@ -281,6 +281,7 @@ def run_throughput(
 
 
 def main() -> None:
+    global LONG_CHUNKS
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://localhost:8000")
     parser.add_argument("--model", default="Qwen/Qwen3-0.6B")
@@ -292,6 +293,9 @@ def main() -> None:
     )
     parser.add_argument("--prefix-chunks", type=int, default=LONG_CHUNKS)
     parser.add_argument(
+        "--chunks", type=int, default=LONG_CHUNKS,
+        help="prompt length in 256-token chunks (default 12)")
+    parser.add_argument(
         "--scenarios", default="1,2,3,4,5", help="comma-separated scenario ids to run"
     )
     parser.add_argument("--throughput-n", type=int, default=20)
@@ -299,6 +303,7 @@ def main() -> None:
 
     tok = AutoTokenizer.from_pretrained(args.tokenizer)
     server_log = Path(args.server_log) if args.server_log else None
+    LONG_CHUNKS = args.chunks
     wanted = {s.strip() for s in args.scenarios.split(",")}
 
     # One-time warmup: the first NPU prefill is 30-40x slower; without this

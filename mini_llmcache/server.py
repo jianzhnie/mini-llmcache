@@ -241,12 +241,17 @@ def main() -> None:
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5555)
+    parser.add_argument(
+        "--bind-url", default=None,
+        help="full ZMQ url (e.g. ipc:///tmp/mini-cache.sock); "
+             "overrides --host/--port")
     parser.add_argument("--chunk-size", type=int, default=256)
     parser.add_argument("--l1-size-gb", type=float, default=20.0)
     parser.add_argument("--l2-adapter", action="append", default=[])
     args: Any = parser.parse_args()
+    bind_url = args.bind_url or f"tcp://{args.host}:{args.port}"
     serve(
-        f"tcp://{args.host}:{args.port}",
+        bind_url,
         args.chunk_size,
         int(args.l1_size_gb * (1 << 30)),
         args.l2_adapter,
