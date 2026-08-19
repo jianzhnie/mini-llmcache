@@ -13,7 +13,10 @@ from concurrent.futures import Future
 import numpy as np
 import torch
 
-from mini_llmcache.l0.device import DEV
+from mini_llmcache.utils.device import get_device_module
+
+#: Active accelerator namespace; raises a clear error on CPU-only machines.
+DEV = get_device_module()
 
 
 class DeviceFuture:

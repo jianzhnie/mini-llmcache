@@ -2,7 +2,7 @@
 """Tests for lookup/prefetch orchestration against a mock L2."""
 import torch
 
-from mini_llmcache.hasher import chunk_hashes
+from mini_llmcache.utils.hasher import chunk_hashes
 from mini_llmcache.l1.manager import L1Manager
 from mini_llmcache.l1.memory import MemoryObj, PoolAllocator
 from mini_llmcache.l1.prefetch_controller import PrefetchController

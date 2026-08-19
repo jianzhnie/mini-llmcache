@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for prefix-chained chunk hashing."""
-from mini_llmcache.hasher import chunk_hashes
+from mini_llmcache.utils.hasher import chunk_hashes
 
 
 def test_chunk_alignment_and_partial_tail():

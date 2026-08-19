@@ -12,7 +12,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any
 
-from mini_llmcache.hasher import chunk_hashes
+from mini_llmcache.utils.hasher import chunk_hashes
 from mini_llmcache.l2.base import L2Adapter
 from mini_llmcache.l2.fs import FSAdapter
 from mini_llmcache.l2.mock import MockAdapter

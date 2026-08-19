@@ -28,6 +28,7 @@ dependencies = [
     "pyzmq",
     "blake3",
     "torch",
+    "transformers",
 ]
 
 [project.urls]

@@ -11,9 +11,9 @@ import torch
 
 def _device_available() -> bool:
     try:
-        from mini_llmcache.l0.device import DEV
+        from mini_llmcache.utils.device import get_device_module
 
-        DEV.current_device()
+        get_device_module().current_device()
         return True
     except (RuntimeError, ImportError, AttributeError):
         return False
@@ -22,8 +22,10 @@ def _device_available() -> bool:
 pytestmark = pytest.mark.skipif(not _device_available(),
                                 reason="no CUDA GPU or Ascend NPU available")
 
-from mini_llmcache.l0.device import DEV  # noqa: E402
 from mini_llmcache.l0.transfer import KVTransfer  # noqa: E402
+from mini_llmcache.utils.device import get_device_module  # noqa: E402
+
+DEV = get_device_module()
 
 
 def make_transfer(num_layers=2, num_blocks=8, block_shape=(4, 3),

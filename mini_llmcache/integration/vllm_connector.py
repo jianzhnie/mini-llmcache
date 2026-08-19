@@ -21,8 +21,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 
 from mini_llmcache.l0 import kv_format
-from mini_llmcache.l0.device import DEV
 from mini_llmcache.l0.transfer import DeviceFuture, KVTransfer
+from mini_llmcache.utils.device import get_device_module
+
+#: Active accelerator namespace; raises a clear error on CPU-only machines.
+DEV = get_device_module()
 from mini_llmcache.mq import MQClient
 from mini_llmcache.protocol import (
     AckPayload,

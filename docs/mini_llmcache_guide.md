@@ -1,4 +1,4 @@
-# mini-llmcache 完全拆解 — 从 3 分钟看懂到一次请求的一生
+# mini-llmcache 完全拆解 — 从 3 分钟看懂到逐文件源码详解
 
 > 这是 [LMCache](https://github.com/LMCache/LMCache) 的迷你教学版(全部代码约 870 行 Python),
 > 完整复刻了它的核心思路:**把 LLM 算过的"草稿"存起来,下次遇到同样的开头直接抄**。
@@ -56,8 +56,8 @@ flowchart LR
 
 | 入口 | 位置 | 启动方式 |
 |---|---|---|
-| 缓存服务器 | `mini_llmcache/server.py:163` `main()` | `python -m mini_llmcache.server ...` |
-| vLLM 挂载 | `mini_llmcache/integration/vllm_connector.py:47` `MiniConnector` | vLLM 按 `--kv-transfer-config` 反射加载 |
+| 缓存服务器 | `mini_llmcache/server.py:197` `main()` | `python -m mini_llmcache.server ...` |
+| vLLM 挂载 | `mini_llmcache/integration/vllm_connector.py:66` `MiniConnector` | vLLM 按 `--kv-transfer-config` 反射加载 |
 
 服务器是"仓库",vLLM 是"客户",两者之间只有**一条 ZMQ 电话线**,两种用途:
 
@@ -66,7 +66,7 @@ flowchart LR
 
 ## 1. 第一幕:仓库开门(服务器启动)
 
-`main()` 解析参数后调 `serve()`(`server.py:154`),组装出 `CacheServer`:
+`main()` 解析参数后调 `serve()`(`server.py:187`),组装出 `CacheServer`:
 
 ```
 CacheServer
@@ -82,13 +82,13 @@ CacheServer
 
 ## 2. 第二幕:客户上门(vLLM 启动握手)
 
-vLLM 实例化 `MiniConnector`(`vllm_connector.py:47`)后,立即完成三件事:
+vLLM 实例化 `MiniConnector`(`vllm_connector.py:66`)后,立即完成三件事:
 
-1. **拨号**:`MQClient` 用 ZMQ DEALER socket 连上仓库电话线
-2. **问规则**:同步调用 `GET_CHUNK_SIZE`——"你家按多大一块切?"(默认 256 token)
+1. **拨号**:`MQClient` 用 ZMQ DEALER socket 连上仓库电话线;`GET_CHUNK_SIZE` 带 30 秒超时,连不上就直接报错退出
+2. **问规则**:"你家按多大一块切?"(默认 256 token)
 3. **办会员卡**:vLLM 把 KV 张量**留在自己进程里**,建好本地搬运引擎(`KVTransfer`,双流三缓冲流水线),只把元数据(`chunk_nbytes` 等)随 `REGISTER_KV_CACHE` 发给仓库
 
-服务器收到注册(`server.py:52`):记下这个引擎的 chunk 大小、block 大小,打印:
+服务器收到注册(`server.py:77`):记下这个引擎的 chunk 大小、block 大小,打印:
 
 ```
 REGISTER Qwen/Qwen3-0.6B rank 0/1 (chunk=28 MiB, 1 engines)
@@ -126,8 +126,8 @@ sequenceDiagram
 
 ### ① LOOKUP —— "这个开头你存过吗?"
 
-- 请求第一次进调度器,vLLM 调 `get_num_new_matched_tokens`(`vllm_connector.py:92`),把 prompt 截成整块,异步发出 `LOOKUP`
-- 服务器(`server.py:76`)对 token 切块算指纹——指纹是**前缀链式 BLAKE3**(`hasher.py:16`):第 3 块的指纹里藏着前 2 块的信息,所以"前 300 个 token 存没存过"只需查一次表
+- 请求第一次进调度器,vLLM 调 `get_num_new_matched_tokens`(`vllm_connector.py:126`),把 prompt 截成整块,异步发出 `LOOKUP`
+- 服务器(`server.py:103`)对 token 切块算指纹——指纹是**前缀链式 BLAKE3**(`utils/hasher.py:26`):第 3 块的指纹里藏着前 2 块的信息,所以"前 300 个 token 存没存过"只需查一次表
 
 ### ② 预取流水线 —— "仓库里翻箱倒柜"
 
@@ -147,18 +147,18 @@ sequenceDiagram
 
 ### ④ RETRIEVE —— "把草稿搬回我的显存"
 
-- vLLM 在开算之前(`start_load_kv`,`vllm_connector.py:244`)就提交了 RETRIEVE——**取货和算尾巴并行**
-- 服务器(`server.py:121`)把命中的 L1 对象序列化成 bytes 返回,并释放这批预取锁
-- vLLM 侧后台线程 `_finish_load`(`vllm_connector.py:227`)收到 bytes 后,用**进程内** H2D 流水线(`transfer.py:111` `from_host`)回填显存:
+- vLLM 在开算之前(`start_load_kv`,`vllm_connector.py:304`)就提交了 RETRIEVE——**取货和算尾巴并行**
+- 服务器(`server.py:148`)把命中的 L1 对象序列化成 bytes 返回,并释放这批预取锁
+- vLLM 侧后台线程 `_finish_load`(`vllm_connector.py:285`)收到 bytes 后,用**进程内** H2D 流水线(`transfer.py:128` `from_host`)回填显存:
   - copy 流:bytes → pinned 内存 → 中转区(3 个缓冲轮流用,一边装一边卸)
   - kernel 流:`index_copy_` 把中转区写回显存里对应的 block
 - 回填完成 → 发 `TRANSFER_ACK` → `done.set()` → vLLM 凭 `DeviceFuture.done()` 知道可以读这些 block
 
 ### ⑤ STORE —— "新算的草稿请入库"
 
-- 算完尾巴,vLLM 在 `wait_for_save`(`vllm_connector.py:247`)提交 STORE
-- 先**进程内** D2H:`transfer.to_host`(`transfer.py:77`)用反向流水线(`index_select` 抽块 → 拷进 pinned 内存)把 KV 块变成 bytes
-- 服务器(`server.py:100`)先 `reserve_write`:给没存过的块**分配内存 + 挂写锁**(写锁期间不可读),把 bytes 写入 L1
+- 算完尾巴,vLLM 在 `wait_for_save`(`vllm_connector.py:308`)提交 STORE
+- 先**进程内** D2H:`transfer.to_host`(`transfer.py:92`)用反向流水线(`index_select` 抽块 → 拷进 pinned 内存)把 KV 块变成 bytes
+- 服务器(`server.py:127`)先 `reserve_write`:给没存过的块**分配内存 + 挂写锁**(写锁期间不可读),把 bytes 写入 L1
 - 摘掉写锁 → 广播"货上架了":
   - LRU 把它挪到"最近使用"队头
   - StoreController 收到通知,后台**异步落盘**(先写临时文件再 rename,防半截文件)
@@ -180,7 +180,7 @@ sequenceDiagram
 1. **前缀链式哈希**:命中判断从"全文比对"变成"一次查表"
 2. **引用计数锁**:写锁 / 读锁 / 临时条目三层,保证"正在用的绝不丢,用完即弃"
 3. **进程内搬运**:GPU⇄CPU 拷贝全部在 vLLM 进程内,跨进程只传字节——CUDA/NPU 通吃
-4. **双流三缓冲流水线**:拷贝与搬运重叠,实测 4~6 GB/s
+4. **双流三缓冲流水线**:拷贝与搬运重叠,实测 4~10 GB/s
 
 一句话总结:**哈希定身份,进程内搬运,锁保平安,线程不挡路**——这就是 LMCache 的核心骨架。
 
@@ -188,7 +188,7 @@ sequenceDiagram
 
 # Part 3 · 副驾拆解:vllm_connector.py
 
-> 目标文件:`mini_llmcache/integration/vllm_connector.py`(278 行)
+> 目标文件:`mini_llmcache/integration/vllm_connector.py`(347 行)
 > 它没有 main、从不单独运行——vLLM 启动时按 `--kv-transfer-config` 反射加载它,
 > 然后在自己调度循环的固定位置,一遍遍调用它的"钩子"。全局流程见本文 Part 2。
 
@@ -214,7 +214,7 @@ vLLM 提供的接口叫 `KVConnectorBase_V1`——本质是一张钩子清单,`M
 
 ## 2. RequestTracker — 每个请求一本流水账
 
-钩子会被 vLLM 反复调用,connector 自己没机会"记住"请求状态,于是给每个请求建一个账本(`vllm_connector.py:30`):
+钩子会被 vLLM 反复调用,connector 自己没机会"记住"请求状态,于是给每个请求建一个账本(`vllm_connector.py:41`):
 
 ```
 token 坐标轴: 0 ───────── vllm_hits ───────── lmcache_hits ─────────── 结尾
@@ -232,7 +232,7 @@ token 坐标轴: 0 ───────── vllm_hits ───────�
 
 ## 3. 核心钩子的工作方式
 
-### get_num_new_matched_tokens — "帮我算好了吗?"(line 92)
+### get_num_new_matched_tokens — "帮我算好了吗?"(line 126)
 
 vLLM 每步都来问一次,回答分三种:
 
@@ -242,9 +242,9 @@ vLLM 每步都来问一次,回答分三种:
 | `(n, True)` | 前 n 个 token 外部已算好,跳过! |
 | `(0, False)` | 查完了,没有便宜可占,自己全算 |
 
-第一次被问:发 **LOOKUP**(异步,发完就走),然后照常轮询;之后每次:打 `QUERY_PREFETCH_STATUS` 问预取线程查好没。注意是**轮询**而非阻塞等待——vLLM 一边 prefill 一边问,查到为止。
+第一次被问:发 **LOOKUP**(异步,发完就走),然后照常轮询;之后每次:打 `QUERY_PREFETCH_STATUS` 问预取线程查好没。注意是**轮询**而非阻塞等待——vLLM 一边 prefill 一边问,查到为止。服务器异常时 fail-open(返回"没有命中",让 vLLM 自己全算),不会拖垮引擎。
 
-### update_state_after_alloc — "block 分好了"(line 116)
+### update_state_after_alloc — "block 分好了"(line 162)
 
 vLLM 分完 block 后调它,副驾做三件事:
 
@@ -252,33 +252,33 @@ vLLM 分完 block 后调它,副驾做三件事:
 2. 有外部 token(`num_external_tokens > 0`)?→ 标记 `load_pending`,该搬货了
 3. 首次分配时算好"哪些预取锁可以解":vLLM 自己会算的部分锁先放掉,要搬回来的部分**继续押着**——`FREE_LOOKUP_LOCKS`
 
-### build_connector_meta — "开搬运单"(line 133)
+### build_connector_meta — "开搬运单"(line 181)
 
 每步调度结束,副驾读 `scheduler_output`(谁新来了、谁续算、谁这轮算了多少 token),更新账本,开出两张单:
 
-- **RETRIEVE 单**(`generate_retrieve_op`,line 66):只开给 `load_pending` 的请求,范围 = [vllm_hits 向下取整到块边界, lmcache_hits);首块中 vLLM 已算的部分用 `skip_first_n_tokens` 标出,避免覆盖
-- **STORE 单**(`generate_store_op`,line 77):三个上限取最小——① 请求总 token 数 ② block 装得下的 ③ vLLM 实际算完的;只存整块,存过的不再存
+- **RETRIEVE 单**(`generate_retrieve_op`,line 96):只开给 `load_pending` 的请求,范围 = [vllm_hits 向下取整到块边界, lmcache_hits);首块中 vLLM 已算的部分用 `skip_first_n_tokens` 标出,避免覆盖
+- **STORE 单**(`generate_store_op`,line 108):三个上限取最小——① 请求总 token 数 ② block 装得下的 ③ vLLM 实际算完的;只存整块,存过的不再存
 
 单子打包成 `MiniConnectorMetadata`(requests 列表)交给 vLLM。
 
-### 两张单如何执行?(line 197 `submit_transfers`)
+### 两张单如何执行?(line 252 `submit_transfers`)
 
 - **STORE 单**:在 `wait_for_save` 里执行——副驾**先在本进程** `to_host()` 把 KV 块拷成 bytes(同步),再随 `TransferPayload` 发给仓库
-- **RETRIEVE 单**:在 `start_load_kv` 里提交——先异步问仓库要 bytes,同时起一个后台线程 `_finish_load`(line 227):拿到 bytes 后**在本进程** `from_host()` 回填显存,再发 `TRANSFER_ACK`、`done.set()`
+- **RETRIEVE 单**:在 `start_load_kv` 里提交——先异步问仓库要 bytes,同时起一个后台线程 `_finish_load`(line 285):拿到 bytes 后**在本进程** `from_host()` 回填显存,再发 `TRANSFER_ACK`、`done.set()`
 
 这样 vLLM 的 forward 不被搬运阻塞,取货与计算并行。
 
 ## 4. 三个巧妙的设计
 
-### ① DeviceFuture 双条件(`l0/transfer.py:10`)
+### ① DeviceFuture 双条件(`l0/transfer.py:19`)
 
 仓库回消息("bytes 在这")≠ 显存里数据就绪。`DeviceFuture.done()` 要看**两个条件**:消息 future 完成,且后台线程 H2D 回填完成后 `done.set()`——两步都过,vLLM 才能读这些 block。
 
-### ② 搬运全程在进程内(line 208 / 227)
+### ② 搬运全程在进程内(line 252 / 285)
 
 GPU⇄CPU 的拷贝从来不交给仓库做:STORE 是"先拷后送",RETRIEVE 是"先取后填"。仓库只管理 CPU 内存,双方各管各的显存——这正是 Ascend NPU 能跑通的唯一姿势(跨进程共享显存被驱动禁止),也与官方 LMCache-Ascend 一致。
 
-### ③ 两个空钩子,一条路线选择(line 268 / 271)
+### ③ 两个空钩子,一条路线选择(line 332 / 337)
 
 `wait_for_layer_load` / `save_kv_layer` 竟然是 `pass`!这不是偷懒:vLLM 给了两条路——"逐层加载 / 逐层保存"(这两个钩子),或"整块搬运"(metadata + submit_transfers)。本实现选了后者:所有搬运信息在 `build_connector_meta` 里打包、一次提交,配合双流流水线整块处理——LMCache 官方实现同样是整块路线。
 
@@ -297,20 +297,215 @@ GPU⇄CPU 的拷贝从来不交给仓库做:STORE 是"先拷后送",RETRIEVE 是
 
 ---
 
-# Part 4 · 上手与地图
+# Part 4 · 源码详解:逐文件走读
+
+> 把 `mini_llmcache/` 的每个文件拆开讲:它管什么、有哪些关键符号、设计上有什么讲究。
+> 行号以当前代码为准。
+
+## 4.1 全景:模块依赖关系
+
+```
+vLLM 进程                                cache server 进程
+┌──────────────────────────────┐        ┌──────────────────────────────────┐
+│ integration/vllm_connector.py│        │ server.py                        │
+│   ├─ l0/transfer.py (搬运)   │        │   ├─ utils/hasher.py (指纹)      │
+│   ├─ utils/device.py (设备)  │        │   ├─ mq.py (电话线)              │
+│   ├─ l0/kv_format.py (布局)  │        │   └─ storage_manager.py          │
+│   └─ mq.py (客户端)          │◄─ZMQ──►│        ├─ l1/memory.py   内存池  │
+└───────────┬──────────────────┘        │        ├─ l1/manager.py  锁管理  │
+            └──── protocol.py ─────────►│        │   ├─ l1/eviction.py LRU │
+              (两端共享的数据结构)        │        │   ├─ l1/prefetch_...    │
+                                        │        │   └─ l1/store_...       │
+                                        │        └─ l2/base|fs|mock.py     │
+                                        └──────────────────────────────────┘
+```
+
+只有 `protocol.py` 和 `mq.py` 被两个进程同时使用;其余模块各归一方。
+
+## 4.2 protocol.py — 通信语言(全文件)
+
+两个进程之间的所有对话,先在这里定义好"词表"。
+
+| 符号 | 行号 | 职责 |
+|---|---|---|
+| `Req` | 9 | 10 种消息类型:注册/注销、LOOKUP/QUERY、STORE/RETRIEVE、FREE_LOOKUP_LOCKS、END_SESSION、TRANSFER_ACK |
+| `ChunkKey` | 25 | **缓存条目的身份证**:`(chunk_hash, model, rank)` 三元组,冻结(frozen)可作 dict key |
+| `LoadStoreOp` | 34 | 一张搬运单:token 范围 + block 编号 + 首块跳过数 |
+| `ReqMeta` | 51 | 搬运单 + 消息类型 + 请求 id,connector metadata 的载体 |
+| `TransferPayload` | 82 | STORE 时携带 bytes 与耗时;RETRIEVE 时空发、服务器回填 bytes |
+| 其余 Payload | 60-117 | 每种消息的参数包,全部是普通 dataclass(可 pickle) |
+
+设计要点:**全 dataclass + 无外部依赖**——保证 pickle 跨进程序列化的可靠性;`ChunkKey` 用 `frozen=True` 防止被误改。
+
+## 4.3 utils/hasher.py — 给 prompt 按指纹(全文件)
+
+```python
+hash[i] = BLAKE3(hash[i-1] + tokens_of_chunk_i)   # hash[0] 从 NONE_HASH 起步
+```
+
+- `hash_one`(15 行):对一块 token 算哈希,**把前一块的哈希作为前缀喂进去**
+- `NONE_HASH`(21 行):空前缀的哈希,链条的起点
+- `chunk_hashes`(26 行):整条 prompt 的所有整块哈希;不足一块的尾巴直接忽略(不缓存半块)
+
+为什么"前缀链式"是核心设计:因为 hash[i] 蕴含了 [0, i] 全部 token 的信息,**判断"前 300 个 token 存没存过"只需要查 hash[2] 这一个 key**,不用从 hash[0] 一路比过去——命中判定从 O(n) 变 O(1)。
+
+## 4.4 mq.py — ZMQ 电话线(全文件)
+
+| 符号 | 行号 | 职责 |
+|---|---|---|
+| `SocketLoop` | 22 | 单线程事件循环:一个 ZMQ socket + 一根自唤醒管道(pipe),用 `Poller` 同时监听两者;发消息先进队列再通过 pipe 唤醒发送 |
+| `MQClient` | 65 | DEALER 端:`submit`(76)发请求拿 Future,`call`(83)阻塞等结果,支持超时 |
+| `MQServer` | 103 | ROUTER 端:每个请求**起一个独立线程**处理(120 行 `handle`),handler 再慢也不挡别的请求 |
+
+两个值得注意的健壮性设计:
+
+1. **异常回传**(120 行):handler 抛异常 → 服务器把异常 pickle 回去 → 客户端 `future.set_exception` 原样抛出。没有这一步,服务器端一报错,客户端 future 就永远挂起。
+2. **超时**:`call(timeout=...)`——connector 启动握手用它防"服务器没起、vLLM 干等"。
+
+## 4.5 server.py — 仓库前台(197 行)
+
+`CacheServer.__init__`(46)只做两件事:装配 `StorageManager`,给 10 种消息各配一名接线员(`self.mq.register`)。之后每个 handler 都是一小段直白的逻辑:
+
+| handler | 行号 | 一句话 |
+|---|---|---|
+| `register` | 77 | 记下引擎的 `chunk_nbytes`,同时更新 `deployments[(model, world_size)]` 供 LOOKUP 查询 |
+| `lookup` | 103 | 给 prompt 算指纹(跨所有 TP rank 各一份),丢给预取线程开工单 |
+| `query` | 111 | 查预取结果,换算成"可跳过 token 数" |
+| `store` | 127 | 把收到的 bytes 写进 L1(先 reserve_write 挂写锁,写完 finish_write) |
+| `retrieve` | 148 | 把 L1 里的 bytes 读出来发回,同时释放预取锁 |
+| `ack` | 168 | 收 connector 的搬运完成汇报,打印 L1→L0 吞吐 |
+
+`op_keys`(97)是所有搬运类 handler 的公共底座:token 范围 → 指纹 → `ChunkKey` 列表。
+
+## 4.6 l0/ 与 utils/ — 设备抽象 + 布局识别 + 搬运引擎
+
+**`utils/device.py`(68 行)** — 多加速器设备选择,三个函数搞定:
+
+| 函数 | 行号 | 职责 |
+|---|---|---|
+| `get_device_type` | 19 | 借助 `transformers.utils` 的可用性检查,按优先级探测 NPU/CUDA/XPU/MLU/MUSA/MPS,全都没有返回 `"cpu"` |
+| `set_device` | 43 | 按 `device.type` 分发到对应加速器的 `set_device` |
+| `get_device_module` | 58 | 返回活动加速器的 torch 命名空间(`torch.npu` / `torch.cuda` / ...);无加速器时抛出清晰的 `RuntimeError` |
+
+消费者(transfer、connector)在模块顶层执行 `DEV = get_device_module()`——所有设备相关代码(stream/event/同步)都通过这个命名空间,上层一行都不用改,换加速器也一行都不用动。
+
+**`l0/kv_format.py`(48 行)** — 不同 vLLM 版本的 KV 张量形状不同,`detect`(23)按形状识别四种布局:
+
+| 布局 | 形状 | 出处 |
+|---|---|---|
+| FA_BLOCK_FIRST | (blocks, 2, bs, heads, hs) | CUDA vLLM 默认 |
+| FA_KV_FIRST | (2, blocks, bs, heads, hs) | 部分 CUDA 配置 |
+| FA_SPLIT | (blocks, bs, heads, hs) | **vllm-ascend:K/V 各自独立** |
+| MLA | (blocks, bs, hs) | MLA 架构 |
+
+`normalize`(40)把它们统一成"dim 0 = block 编号"的标准姿势,搬运引擎就能一视同仁。注意 FA_KV_FIRST 的判定只看 `shape[0] == 2`——ascend 会 padding block 数,不能拿它跟 `num_blocks` 比相等。
+
+**`transfer.py`(171 行)** — 搬运引擎本体(运行在 vLLM 进程内):
+
+| 符号 | 行号 | 职责 |
+|---|---|---|
+| `DeviceFuture` | 19 | 双条件完成判定:消息回执 + GPU 回填线程的 done 事件 |
+| `Pipeline` | 42 | 双流三缓冲:kernel 流负责抽块/填块,`copy` 流负责 DMA;`ready`/`free` 事件把三个缓冲槽串成流水线 |
+| `KVTransfer` | 76 | 按注册时的 KV 张量构造 d2h/h2d 两条流水线 |
+| `to_host` | 92 | D2H:`index_select` 抽块 → 拷进 pinned 内存 → 返回 bytes 列表 |
+| `from_host` | 128 | H2D:bytes → pinned 内存 → `index_copy_` 填回显存,支持首块 `skip_blocks` |
+
+两个跨平台正确性决策(都是 Ascend 逼出来的):
+
+- 出入口用**设备级 `synchronize()`** 代替 CUDA 的 interprocess event(NPU 驱动不支持后者);
+- bytes 进 pinned 内存用 **numpy 直接拷贝**(`cpu_bufs[buf].numpy()[:] = ...`),避免 `torch.frombuffer` 对只读 buffer 的告警。
+
+## 4.7 l1/memory.py — 桌面内存池(全文件)
+
+- `MemoryObj`(15):一个已分配切片的句柄;`byte_array` property(22)给出可读写的字节视图,`nbytes`(27)给出大小
+- `PoolAllocator`(31):**一整块 pinned 内存** + 一个游标 `brk` + 按大小分类的空闲表 `free_segments`
+
+```python
+allocate(count, nbytes):  先翻空闲表(后进先出),不够再推进游标;还不够 → 返回 None(整体失败,已拿的退回去)
+free(objs):               偏移量记回对应大小的空闲表
+```
+
+要点:pinned(page-locked)内存让 vLLM 进程的 DMA 可以直接读写这些缓冲区;`allocate` 的"要么全给要么全不给"语义让上层(reserve_write)可以干净地失败。
+
+## 4.8 l1/manager.py — 锁协议的心脏(全文件)
+
+`L1Manager`(52)管三样东西:条目表 `entries`、一把大锁、一组监听者(listeners)。**锁协议**是本文件(乃至整个项目)最值得读懂的部分:
+
+| 状态 | 含义 | 谁设置 | 谁清除 |
+|---|---|---|---|
+| `write_locked` | 正在写入,不可读 | `reserve_write`(66) | `finish_write`(86) |
+| `read_count > 0` | 正被读/被预取押着,不可淘汰 | `reserve_read`(103)/`reserve_read_prefix`(116) | `finish_read`(139) |
+| `is_temporary` | 从 L2 预取来的"一次性"条目 | `reserve_write(is_temporary=True)` | read_count 归零即**直接释放**(139 行),不留在缓存里 |
+
+关键方法一览:
+
+- `reserve_write`(66):只给**缺失**的 key 分配内存并挂写锁,已存在的 key 返回 None——重复 STORE 自动跳过
+- `reserve_read_prefix`(116):按顺序数连续可读前缀并全部加读计数——L1 命中检测 + 锁定一步完成
+- `finish_read`(139):读计数归零;临时条目当场归还内存池,常驻条目通知 LRU"被碰过了"
+- `delete`(150):只删"没人用"的条目(`force=True` 例外,预取失败清理用)
+- 事件通知(`notify`,62):所有状态变化广播给监听者(空列表不广播),LRU 和 StoreController 都靠它驱动
+
+## 4.9 l1/ 的三个后台线程
+
+| 文件 | 类 | 触发 | 逻辑 |
+|---|---|---|---|
+| `eviction.py` | `LRUPolicy`(15) | 监听 created/touched/removed | `OrderedDict` 维护新旧顺序;`get_victims`(35)从队头(最旧)取 |
+| `eviction.py` | `EvictionController`(49) | 每秒醒来 | 占用超过 80% 水位线,按 LRU 淘汰 20%(只挑 unlocked) |
+| `prefetch_controller.py` | `PrefetchController`(20) | 收到 LOOKUP 开工单 | 见下 |
+| `store_controller.py` | `StoreController`(11) | 监听 write_finished | 拿到新写块的读锁 → 逐个 L2 落盘 → 释放读锁 |
+
+`PrefetchController` 的 `prefetch`(36)是一条清晰的分段流水:
+
+```
+reserve_read_prefix(L1 前缀命中) → lookup_l2s(各 L2 并行问) → reserve_load(临时条目占位)
+→ load_from_l2s(命中多的 adapter 优先读) → resolve(记结果 + 押住所有命中块的读锁)
+```
+
+两个细节值得品味:
+
+- `resolve`(91)里有个**竞态防御**:如果 connector 已经 `end_session` 抢先一步,这里就把读锁全放了(94 行的 `request_id in self.hits` 判断);
+- `held` 字典(押住的锁)由 connector 分三波渐进释放:`FREE_LOOKUP_LOCKS`(自己会算的部分)→ RETRIEVE(搬走的块)→ END_SESSION(兜底)。
+
+## 4.10 l2/ — 文件柜:可插拔的三层
+
+| 文件 | 内容 |
+|---|---|
+| `base.py` | `L2Adapter` **ABC**(19):自带一个工作线程串行执行 store/lookup/load;异常经 `future.set_exception` 回传,线程不死 |
+| `fs.py` | 文件系统实现:每块一个文件 `model@rank@hash.data`;写入走 tmp + `os.replace` 原子改名(26),断电也不会留半截文件 |
+| `mock.py` | 内存字典实现,测试专用 |
+
+接口契约只有三条(见 base 的抽象方法):`store(keys, objs)` 落盘;`lookup(keys) -> 前缀命中数`;`load(keys, objs) -> 实际读取数`。想接 Redis/Mooncake,写一个 ~20 行的子类即可。
+
+## 4.11 storage_manager.py — 装配图(16 行)
+
+整个仓库的"总装线"——六行代码把四个部件拧在一起:
+
+```python
+self.l1        = L1Manager(PoolAllocator(capacity_bytes))   # 桌面
+self.store     = StoreController(self.l1, l2s) if l2s       # 库管(有 L2 才存在)
+self.prefetch  = PrefetchController(self.l1, l2s)           # 找货员
+self.eviction  = EvictionController(self.l1, LRUPolicy())   # 保洁
+```
+
+构造完成即启动三个守护线程,仓库开张。注意 `self.store` 在无 L2 时为 None——服务器可以只跑 L1。
+
+---
+
+# Part 5 · 上手与地图
 
 ## 目录地图
 
 | 目录 | 一句话职责 |
 |---|---|
 | `mini_llmcache/server.py` | 缓存服务器:注册引擎、查指纹、管理 L1/L2(纯 CPU,不碰 GPU) |
-| `mini_llmcache/hasher.py` | 给 prompt 切块算指纹(**核心**) |
+| `mini_llmcache/utils/` | 公共工具:切块算指纹(`hasher.py`)+ 多加速器设备选择(`device.py`,支持 NPU/CUDA/XPU/MLU/MUSA/MPS) |
 | `mini_llmcache/mq.py` | 用 ZeroMQ 搭的简易 RPC 电话线 |
 | `mini_llmcache/protocol.py` | 10 种消息类型 + 数据结构定义 |
-| `mini_llmcache/l0/` | 搬运工:跑在 vLLM 进程里的双流流水线(`transfer.py`)+ 设备抽象(`device.py`)+ KV 布局识别(`kv_format.py`) |
+| `mini_llmcache/l0/` | 搬运工:跑在 vLLM 进程里的双流流水线(`transfer.py`)+ KV 布局识别(`kv_format.py`) |
 | `mini_llmcache/l1/` | 桌上文件管理:内存池、读写锁、LRU、预取 |
 | `mini_llmcache/l2/` | 文件柜:插拔式 adapter(自带文件系统版 + mock 版) |
 | `mini_llmcache/integration/vllm_connector.py` | 打进 vLLM 的钩子,告诉它何时存、何时取、能跳多少 |
+| `tests/` | 49 个 pytest 用例:单元 + 集成 + 设备门控的搬运往返 |
 
 ## 跑起来
 
@@ -340,8 +535,8 @@ curl -s http://localhost:8000/v1/completions -H 'Content-Type: application/json'
 服务器日志会告诉你一切(Ascend 910 实测):
 
 ```
-STORE    rid=... tokens [0, 768) L0->L1 4.7 GB/s   ← 第一遍:算完存起来(18.07s)
-RETRIEVE rid=... tokens [0, 768) hit L1=3 L2=0      ← 第二遍:直接搬回来(0.93s,19.4× 加速)
+STORE    rid=... tokens [0, 768) L0->L1 9.2 GB/s   ← 第一遍:算完存起来(0.92s)
+RETRIEVE rid=... tokens [0, 768) hit L1=3 L2=0      ← 第二遍:直接搬回来(prefill 全跳过)
 ```
 
 > 小提示:首次 STORE 和 RETRIEVE 需要 warmup,会慢 30~40 倍,第二次起才是真实速度。
@@ -350,7 +545,7 @@ RETRIEVE rid=... tokens [0, 768) hit L1=3 L2=0      ← 第二遍:直接搬回�
 
 | 文档 | 内容 |
 |---|---|
-| 本文 | Part 1 总览 · Part 2 执行流程拆解 · Part 3 副驾(MiniConnector)拆解 · Part 4 上手地图 |
+| 本文 | Part 1 总览 · Part 2 执行流程拆解 · Part 3 副驾(MiniConnector)拆解 · Part 4 逐文件源码详解 · Part 5 上手地图 |
 | [ascend_env.md](ascend_env.md) | Ascend NPU 适配记录 + 完整测试报告 |
 
 ## 适合谁读
