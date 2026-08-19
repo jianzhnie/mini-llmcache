@@ -5,17 +5,17 @@ File name encodes identity: ``model@rank@hash.data``.  Writes go through
 a temp file + atomic rename so a crash never leaves a half-written chunk
 that a later lookup would trust.
 """
+
 import os
 from pathlib import Path
 
-from mini_llmcache.l2.base import L2Adapter
 from mini_llmcache.l1.memory import MemoryObj
+from mini_llmcache.l2.base import L2Adapter
 from mini_llmcache.protocol import ChunkKey
 
 
 def filename(key: ChunkKey) -> str:
-    return (f"{key.model.replace('/', '-')}@{key.rank:x}"
-            f"@{key.chunk_hash.hex()}.data")
+    return f"{key.model.replace('/', '-')}@{key.rank:x}@{key.chunk_hash.hex()}.data"
 
 
 class FSAdapter(L2Adapter):
@@ -26,7 +26,7 @@ class FSAdapter(L2Adapter):
         super().__init__()
 
     def store(self, keys: list[ChunkKey], objs: list[MemoryObj]) -> None:
-        for key, obj in zip(keys, objs):
+        for key, obj in zip(keys, objs, strict=False):
             final = self.base / filename(key)
             if final.exists():
                 continue
@@ -46,7 +46,7 @@ class FSAdapter(L2Adapter):
     def load(self, keys: list[ChunkKey], objs: list[MemoryObj]) -> int:
         """Fill ``objs`` from disk; stop at the first missing chunk."""
         loaded = 0
-        for key, obj in zip(keys, objs):
+        for key, obj in zip(keys, objs, strict=False):
             path = self.base / filename(key)
             if not path.exists():
                 break

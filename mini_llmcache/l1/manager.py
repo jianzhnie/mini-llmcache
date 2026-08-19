@@ -11,6 +11,7 @@ Lock protocol (the heart of cache safety):
   only to serve one lookup; once their read count drops to zero they are
   freed immediately instead of becoming resident cache.
 """
+
 import threading
 from dataclasses import dataclass
 
@@ -21,17 +22,13 @@ from mini_llmcache.protocol import ChunkKey
 class Listener:
     """Observer of L1 lifecycle events (LRU policy, store controller...)."""
 
-    def on_created(self, _keys: list[ChunkKey]) -> None:
-        ...
+    def on_created(self, _keys: list[ChunkKey]) -> None: ...
 
-    def on_write_finished(self, _keys: list[ChunkKey]) -> None:
-        ...
+    def on_write_finished(self, _keys: list[ChunkKey]) -> None: ...
 
-    def on_touched(self, _keys: list[ChunkKey]) -> None:
-        ...
+    def on_touched(self, _keys: list[ChunkKey]) -> None: ...
 
-    def on_removed(self, _keys: list[ChunkKey]) -> None:
-        ...
+    def on_removed(self, _keys: list[ChunkKey]) -> None: ...
 
 
 @dataclass
@@ -63,8 +60,9 @@ class L1Manager:
         for listener in self.listeners:
             getattr(listener, event)(keys)
 
-    def reserve_write(self, keys: list[ChunkKey], chunk_nbytes: int,
-                      is_temporary: bool = False) -> dict[ChunkKey, MemoryObj | None]:
+    def reserve_write(
+        self, keys: list[ChunkKey], chunk_nbytes: int, is_temporary: bool = False
+    ) -> dict[ChunkKey, MemoryObj | None]:
         """Allocate and write-lock any missing keys.
 
         Keys already present are left untouched and map to ``None`` in the
@@ -77,9 +75,10 @@ class L1Manager:
             objs = self.allocator.allocate(len(missing), chunk_nbytes)
             if objs is None:
                 return result
-            for key, obj in zip(missing, objs):
-                self.entries[key] = Entry(obj, write_locked=True,
-                                          is_temporary=is_temporary)
+            for key, obj in zip(missing, objs, strict=False):
+                self.entries[key] = Entry(
+                    obj, write_locked=True, is_temporary=is_temporary
+                )
                 result[key] = obj
             return result
 

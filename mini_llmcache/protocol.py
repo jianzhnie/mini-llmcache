@@ -2,6 +2,7 @@
 """Wire protocol: message types and payload dataclasses shared by the
 vLLM connector and the cache server (serialized with pickle over ZMQ).
 """
+
 import enum
 from dataclasses import dataclass, field
 

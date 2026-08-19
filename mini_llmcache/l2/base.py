@@ -6,11 +6,13 @@ serially, so adapters do not need to be thread-safe themselves.  Subclasses
 implement the three operations; the worker catches their exceptions and
 surfaces them on the returned futures.
 """
+
 import queue
 import threading
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from concurrent.futures import Future
-from typing import Any, Callable
+from typing import Any
 
 from mini_llmcache.l1.memory import MemoryObj
 from mini_llmcache.protocol import ChunkKey
@@ -37,15 +39,13 @@ class L2Adapter(ABC):
 
     # ---- async submission ----
 
-    def submit_store(self, keys: list[ChunkKey],
-                     objs: list[MemoryObj]) -> Future:
+    def submit_store(self, keys: list[ChunkKey], objs: list[MemoryObj]) -> Future:
         return self.submit(self.store, keys, objs)
 
     def submit_lookup(self, keys: list[ChunkKey]) -> Future:
         return self.submit(self.lookup, keys)
 
-    def submit_load(self, keys: list[ChunkKey],
-                    objs: list[MemoryObj]) -> Future:
+    def submit_load(self, keys: list[ChunkKey], objs: list[MemoryObj]) -> Future:
         return self.submit(self.load, keys, objs)
 
     def submit(self, fn: Callable, *args: Any) -> Future:
@@ -58,5 +58,5 @@ class L2Adapter(ABC):
             future, fn, args = self.tasks.get()
             try:
                 future.set_result(fn(*args))
-            except Exception as exc:  # noqa: BLE001 — surfaced to callers
+            except Exception as exc:
                 future.set_exception(exc)

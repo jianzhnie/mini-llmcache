@@ -6,6 +6,7 @@
 and reused before the bump pointer moves forward.  Pinned (page-locked)
 memory lets the vLLM process DMA straight into these buffers.
 """
+
 from dataclasses import dataclass
 
 import torch
@@ -30,8 +31,7 @@ class MemoryObj:
 
 class PoolAllocator:
     def __init__(self, capacity_bytes: int):
-        self.pool = torch.empty(capacity_bytes, dtype=torch.uint8,
-                                pin_memory=True)
+        self.pool = torch.empty(capacity_bytes, dtype=torch.uint8, pin_memory=True)
         self.brk = 0
         #: Free segments per chunk size, as offsets into the pool.
         self.free_segments: dict[int, list[int]] = {}
@@ -54,7 +54,7 @@ class PoolAllocator:
             free.extend(offsets)
             return None
         self.used_bytes += count * nbytes
-        return [MemoryObj(self.pool[o:o + nbytes], o) for o in offsets]
+        return [MemoryObj(self.pool[o : o + nbytes], o) for o in offsets]
 
     def free(self, objs: list[MemoryObj]) -> None:
         for obj in objs:

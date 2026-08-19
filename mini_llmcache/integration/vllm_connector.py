@@ -8,6 +8,7 @@ KV cache (RETRIEVE), and which computed blocks to save (STORE).  GPU<->host
 copies happen here in the vLLM process (see l0/transfer.py); the cache
 server only ever receives bytes.
 """
+
 import threading
 import uuid
 from concurrent.futures import Future
@@ -67,24 +68,28 @@ class MiniConnectorMetadata(KVConnectorMetadata):
 
 
 class MiniConnector(KVConnectorBase_V1):
-    def __init__(self, vllm_config: Any, role: Any,
-                 kv_cache_config: Any = None):
+    def __init__(self, vllm_config: Any, role: Any, kv_cache_config: Any = None):
         super().__init__(vllm_config, role, kv_cache_config)
         self.vllm_config = vllm_config
         extra = vllm_config.kv_transfer_config.kv_connector_extra_config
-        self.client = MQClient("tcp://{}:{}".format(
-            extra.get("mini.host", "localhost"), extra.get("mini.port", 5555)))
+        self.client = MQClient(
+            "tcp://{}:{}".format(
+                extra.get("mini.host", "localhost"), extra.get("mini.port", 5555)
+            )
+        )
         # Fail fast with a clear message if the cache server is unreachable.
         try:
             self.chunk_size = self.client.call(Req.GET_CHUNK_SIZE, timeout=30)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise RuntimeError(
                 "cannot reach the mini-llmcache cache server "
                 f"(mini.host={extra.get('mini.host', 'localhost')}, "
-                f"mini.port={extra.get('mini.port', 5555)}): {exc}") from exc
+                f"mini.port={extra.get('mini.port', 5555)}): {exc}"
+            ) from exc
         self.block_size = vllm_config.cache_config.block_size
-        assert self.chunk_size % self.block_size == 0, \
+        assert self.chunk_size % self.block_size == 0, (
             "chunk_size must be a multiple of vLLM's block_size"
+        )
         self.model = vllm_config.model_config.model
         self.world_size = vllm_config.parallel_config.tensor_parallel_size
         self.instance_id = uuid.uuid4().int & ((1 << 63) - 1)
@@ -105,14 +110,19 @@ class MiniConnector(KVConnectorBase_V1):
         end = tracker.lmcache_hits
         return LoadStoreOp(
             tracker.token_ids[:end],
-            tracker.block_ids[start // self.block_size:end // self.block_size],
-            start, end, tracker.vllm_hits - start)
+            tracker.block_ids[start // self.block_size : end // self.block_size],
+            start,
+            end,
+            tracker.vllm_hits - start,
+        )
 
     def generate_store_op(self, tracker: RequestTracker) -> LoadStoreOp | None:
         """One STORE op for the newly computed whole chunks, if any."""
-        available = min(len(tracker.token_ids),
-                        len(tracker.block_ids) * self.block_size,
-                        tracker.num_computed_tokens)
+        available = min(
+            len(tracker.token_ids),
+            len(tracker.block_ids) * self.block_size,
+            tracker.num_computed_tokens,
+        )
         num_chunks = (available - tracker.num_stored_tokens) // self.chunk_size
         if num_chunks <= 0:
             return None
@@ -121,14 +131,16 @@ class MiniConnector(KVConnectorBase_V1):
         tracker.num_stored_tokens = end
         return LoadStoreOp(
             tracker.token_ids[:end],
-            tracker.block_ids[start // self.block_size:end // self.block_size],
-            start, end)
+            tracker.block_ids[start // self.block_size : end // self.block_size],
+            start,
+            end,
+        )
 
     # ---- vLLM hooks ----------------------------------------------------
 
-    def get_num_new_matched_tokens(self, request: Any,
-                                   num_computed_tokens: int
-                                   ) -> tuple[int | None, bool]:
+    def get_num_new_matched_tokens(
+        self, request: Any, num_computed_tokens: int
+    ) -> tuple[int | None, bool]:
         """Tell vLLM how many prompt tokens the cache has pre-computed.
 
         First call submits LOOKUP (async); later calls poll
@@ -143,15 +155,21 @@ class MiniConnector(KVConnectorBase_V1):
             # Whole chunks only; chunk_hashes ignores a trailing partial
             # chunk anyway, so no need to drop one here.
             num_lookup = len(prompt) // self.chunk_size * self.chunk_size
-            self.client.submit(Req.LOOKUP, LookupPayload(
-                request.request_id, prompt[:num_lookup],
-                self.model, self.world_size))
+            self.client.submit(
+                Req.LOOKUP,
+                LookupPayload(
+                    request.request_id, prompt[:num_lookup], self.model, self.world_size
+                ),
+            )
         elif tracker.lookup_resolved:
             return 0, False
         try:
-            hits = self.client.call(Req.QUERY_PREFETCH_STATUS, QueryPayload(
-                request.request_id, self.world_size), timeout=30)
-        except Exception:  # noqa: BLE001 — fail open, let vLLM recompute
+            hits = self.client.call(
+                Req.QUERY_PREFETCH_STATUS,
+                QueryPayload(request.request_id, self.world_size),
+                timeout=30,
+            )
+        except Exception:
             tracker.lookup_resolved = True
             return 0, False
         if hits is None:
@@ -164,27 +182,32 @@ class MiniConnector(KVConnectorBase_V1):
             return hits - num_computed_tokens, True
         return 0, False
 
-    def update_state_after_alloc(self, request: Any, blocks: Any,
-                                 num_external_tokens: int) -> None:
+    def update_state_after_alloc(
+        self, request: Any, blocks: Any, num_external_tokens: int
+    ) -> None:
         """Record allocated blocks and free lookup locks we won't need."""
         if not (tracker := self.trackers.get(request.request_id)):
             return
         group_blocks = blocks.get_block_ids()[0]
-        tracker.block_ids.extend(group_blocks[len(tracker.block_ids):])
+        tracker.block_ids.extend(group_blocks[len(tracker.block_ids) :])
         if num_external_tokens > 0:
             tracker.load_pending = True
         if tracker.alloc_seen:
             return
         tracker.alloc_seen = True
         lmcache_chunks = tracker.lmcache_hits // self.chunk_size
-        free_until = min(tracker.vllm_hits // self.chunk_size, lmcache_chunks) \
-            if tracker.load_pending else lmcache_chunks
+        free_until = (
+            min(tracker.vllm_hits // self.chunk_size, lmcache_chunks)
+            if tracker.load_pending
+            else lmcache_chunks
+        )
         if free_until:
-            self.client.submit(Req.FREE_LOOKUP_LOCKS, FreeLocksPayload(
-                request.request_id, free_until, self.world_size))
+            self.client.submit(
+                Req.FREE_LOOKUP_LOCKS,
+                FreeLocksPayload(request.request_id, free_until, self.world_size),
+            )
 
-    def build_connector_meta(self, scheduler_output: Any
-                             ) -> MiniConnectorMetadata:
+    def build_connector_meta(self, scheduler_output: Any) -> MiniConnectorMetadata:
         """Update trackers from the scheduler output and queue transfer ops."""
         metas = []
         for req_id, tracker in self.trackers.items():
@@ -219,8 +242,9 @@ class MiniConnector(KVConnectorBase_V1):
                 metas.append(ReqMeta(req_id, Req.STORE, op))
         return MiniConnectorMetadata(metas)
 
-    def request_finished(self, request: Any,
-                         _block_ids: list[int]) -> tuple[bool, None]:
+    def request_finished(
+        self, request: Any, _block_ids: list[int]
+    ) -> tuple[bool, None]:
         self.trackers.pop(request.request_id, None)
         self.client.submit(Req.END_SESSION, request.request_id)
         return True, None
@@ -242,22 +266,27 @@ class MiniConnector(KVConnectorBase_V1):
             else:
                 layers.append(cache)
         views = kv_format.normalize(
-            layers, self.vllm_config.cache_config.num_gpu_blocks)
-        self.transfer = KVTransfer(views, self.block_size, self.chunk_size,
-                                   get_tensor_model_parallel_rank())
-        self.client.call(Req.REGISTER_KV_CACHE, RegisterPayload(
-            instance_id=self.instance_id,
-            model=self.model,
-            rank=self.transfer.rank,
-            world_size=self.world_size,
-            block_size=self.block_size,
-            chunk_nbytes=self.transfer.chunk_nbytes,
-        ), timeout=30)
+            layers, self.vllm_config.cache_config.num_gpu_blocks
+        )
+        self.transfer = KVTransfer(
+            views, self.block_size, self.chunk_size, get_tensor_model_parallel_rank()
+        )
+        self.client.call(
+            Req.REGISTER_KV_CACHE,
+            RegisterPayload(
+                instance_id=self.instance_id,
+                model=self.model,
+                rank=self.transfer.rank,
+                world_size=self.world_size,
+                block_size=self.block_size,
+                chunk_nbytes=self.transfer.chunk_nbytes,
+            ),
+            timeout=30,
+        )
 
     def submit_transfers(self, req: Req) -> dict[str, DeviceFuture]:
         """Execute the queued ops for one Req type (STORE or RETRIEVE)."""
-        ops = [m for m in self._get_connector_metadata().requests
-               if m.req == req]
+        ops = [m for m in self._get_connector_metadata().requests if m.req == req]
         if not ops:
             return {}
         if self.transfer is None:
@@ -270,25 +299,35 @@ class MiniConnector(KVConnectorBase_V1):
                 # only receives the resulting bytes.
                 chunks, elapsed = self.transfer.to_host(m.op.block_ids)
                 nbytes = len(chunks) * self.transfer.chunk_nbytes
-                future = self.client.submit(req, TransferPayload(
-                    m.request_id, self.instance_id, m.op,
-                    chunks=chunks, elapsed=elapsed, nbytes=nbytes))
+                future = self.client.submit(
+                    req,
+                    TransferPayload(
+                        m.request_id,
+                        self.instance_id,
+                        m.op,
+                        chunks=chunks,
+                        elapsed=elapsed,
+                        nbytes=nbytes,
+                    ),
+                )
                 out[m.request_id] = DeviceFuture(future, device)
             else:  # RETRIEVE: fetch bytes, then scatter them into the KV
                 # cache in a worker thread so the forward isn't blocked.
-                future = self.client.submit(req, TransferPayload(
-                    m.request_id, self.instance_id, m.op))
+                future = self.client.submit(
+                    req, TransferPayload(m.request_id, self.instance_id, m.op)
+                )
                 done = threading.Event()
                 threading.Thread(
                     target=self._finish_load,
                     args=(m.request_id, m.op, future, done),
-                    daemon=True).start()
-                out[m.request_id] = DeviceFuture(future, device,
-                                                 done_event=done)
+                    daemon=True,
+                ).start()
+                out[m.request_id] = DeviceFuture(future, device, done_event=done)
         return out
 
-    def _finish_load(self, request_id: str, op: LoadStoreOp,
-                     future: Future, done: threading.Event) -> None:
+    def _finish_load(
+        self, request_id: str, op: LoadStoreOp, future: Future, done: threading.Event
+    ) -> None:
         """Worker thread: scatter the fetched bytes into the KV cache."""
         try:
             device_module.set_device(self.transfer.device.index)
@@ -296,12 +335,15 @@ class MiniConnector(KVConnectorBase_V1):
             if chunks is None:
                 raise RuntimeError("cache server returned no chunks")
             elapsed = self.transfer.from_host(
-                chunks, op.block_ids,
-                skip_blocks=op.skip_first_n_tokens // self.block_size)
+                chunks,
+                op.block_ids,
+                skip_blocks=op.skip_first_n_tokens // self.block_size,
+            )
             nbytes = len(chunks) * self.transfer.chunk_nbytes
-            self.client.submit(Req.TRANSFER_ACK, AckPayload(
-                request_id, "RETRIEVE", nbytes, elapsed))
-        except Exception as exc:  # noqa: BLE001 — fail soft: vLLM recomputes
+            self.client.submit(
+                Req.TRANSFER_ACK, AckPayload(request_id, "RETRIEVE", nbytes, elapsed)
+            )
+        except Exception as exc:
             print(f"RETRIEVE failed rid={request_id}: {exc}", flush=True)
         finally:
             done.set()
@@ -315,8 +357,7 @@ class MiniConnector(KVConnectorBase_V1):
         for req_id, future in self.submit_transfers(Req.STORE).items():
             self.store_futures.setdefault(req_id, []).append(future)
 
-    def get_finished(self, finished_req_ids: set[str]
-                     ) -> tuple[set[str], set[str]]:
+    def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Report requests whose async store/load has fully completed."""
         self.pending_sends |= finished_req_ids
         for req_id, futures in list(self.store_futures.items()):
@@ -325,11 +366,13 @@ class MiniConnector(KVConnectorBase_V1):
                 self.store_futures[req_id] = live
             else:
                 del self.store_futures[req_id]
-        finished_sending = {req_id for req_id in self.pending_sends
-                            if req_id not in self.store_futures}
+        finished_sending = {
+            req_id for req_id in self.pending_sends if req_id not in self.store_futures
+        }
         self.pending_sends -= finished_sending
-        finished_recving = {req_id for req_id, future
-                            in self.load_futures.items() if future.done()}
+        finished_recving = {
+            req_id for req_id, future in self.load_futures.items() if future.done()
+        }
         for req_id in finished_recving:
             del self.load_futures[req_id]
         return finished_sending, finished_recving
@@ -339,8 +382,9 @@ class MiniConnector(KVConnectorBase_V1):
         (build_connector_meta + submit_transfers), not layer-by-layer."""
         pass
 
-    def save_kv_layer(self, _layer_name: str, _kv_layer: Any,
-                      _attn_metadata: Any, **_kwargs: Any) -> None:
+    def save_kv_layer(
+        self, _layer_name: str, _kv_layer: Any, _attn_metadata: Any, **_kwargs: Any
+    ) -> None:
         """Unused: see wait_for_layer_load."""
         pass
 

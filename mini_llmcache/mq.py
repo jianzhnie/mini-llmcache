@@ -6,13 +6,15 @@ queued and flushed via a pipe wakeup; replies are matched to pending
 ``Future``s by an incrementing request id.  Server-side handler
 exceptions are shipped back and re-raised on the client's future.
 """
+
 import itertools
 import os
 import pickle
 import queue
 import threading
+from collections.abc import Callable
 from concurrent.futures import Future
-from typing import Any, Callable
+from typing import Any
 
 import zmq
 
@@ -80,8 +82,7 @@ class MQClient(SocketLoop):
         self.send([pickle.dumps((uid, req, payload))])
         return fut
 
-    def call(self, req: Req, payload: Any = None,
-             timeout: float | None = None) -> Any:
+    def call(self, req: Req, payload: Any = None, timeout: float | None = None) -> Any:
         """Send ``req`` and block for the reply.
 
         Raises whatever exception the server handler raised; ``timeout``
@@ -117,8 +118,7 @@ class MQServer(SocketLoop):
 
     def on_recv(self, frames: list[bytes]) -> None:
         identity, blob = frames
-        threading.Thread(target=self.handle, args=(identity, blob),
-                         daemon=True).start()
+        threading.Thread(target=self.handle, args=(identity, blob), daemon=True).start()
 
     def handle(self, identity: bytes, blob: bytes) -> None:
         """Run the handler and ship back ``(uid, ok, result-or-exception)``.
@@ -136,10 +136,14 @@ class MQServer(SocketLoop):
             else:
                 frames = [identity, pickle.dumps((uid, True, result))]
             self.send(frames)
-        except Exception as exc:  # noqa: BLE001 — surfaced to the client
+        except Exception as exc:
             self.send([identity, pickle.dumps((uid, False, exc))])
 
 
 def _is_chunk_list(result: Any) -> bool:
-    return (isinstance(result, list) and bool(result)
-            and all(isinstance(x, bytes) for x in result))
+    # bytes or memoryview (both satisfy the buffer protocol ZMQ needs).
+    return (
+        isinstance(result, list)
+        and bool(result)
+        and all(isinstance(x, bytes | memoryview) for x in result)
+    )

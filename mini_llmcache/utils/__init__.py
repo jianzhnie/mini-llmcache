@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shared utilities: prefix hashing and accelerator backend selection."""
+
 from mini_llmcache.utils.device import (
     get_device_module,
     get_device_type,

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """LRU eviction: when L1 fills past a watermark, throw out the cold tail."""
+
 import threading
 import time
 from collections import OrderedDict
@@ -32,8 +33,7 @@ class LRUPolicy(Listener):
             for key in keys:
                 self.order.pop(key, None)
 
-    def get_victims(self, ratio: float,
-                    eligible: callable) -> list[ChunkKey]:
+    def get_victims(self, ratio: float, eligible: callable) -> list[ChunkKey]:
         """Return up to ``ratio`` of the least-recently-used eligible keys."""
         with self.lock:
             target = max(1, int(len(self.order) * ratio))
@@ -61,6 +61,5 @@ class EvictionController:
             used, total = self.l1.usage()
             if used / total < WATERMARK:
                 continue
-            victims = self.policy.get_victims(EVICTION_RATIO,
-                                             self.l1.is_evictable)
+            victims = self.policy.get_victims(EVICTION_RATIO, self.l1.is_evictable)
             self.l1.delete(victims)

@@ -7,6 +7,7 @@ chunk's own tokens, so hash[i] uniquely identifies the full token prefix
 up to chunk i.  This turns "does the cache contain this prefix?" into a
 single dictionary lookup per chunk.
 """
+
 import struct
 
 import blake3

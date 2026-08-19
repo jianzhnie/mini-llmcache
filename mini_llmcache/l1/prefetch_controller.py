@@ -7,6 +7,7 @@ entries, and finally "resolves" the request: the hit keys stay read-locked
 (``held``) until the connector releases them (FREE_LOOKUP_LOCKS / RETRIEVE
 / END_SESSION), so they cannot be evicted while the request needs them.
 """
+
 import queue
 import threading
 import time
@@ -33,8 +34,9 @@ class PrefetchController:
         while True:
             self.prefetch(*self.jobs.get())
 
-    def prefetch(self, request_id: str, keys: list[ChunkKey],
-                 chunk_nbytes: int | None) -> None:
+    def prefetch(
+        self, request_id: str, keys: list[ChunkKey], chunk_nbytes: int | None
+    ) -> None:
         """Resolve one lookup: L1 prefix hits + L2 loads."""
         l1_hits = self.l1.reserve_read_prefix(keys)
         missing = keys[l1_hits:]
@@ -44,8 +46,9 @@ class PrefetchController:
             self.resolve(request_id, keys[:l1_hits], [], 0.0)
             return
         l2_hits = self.lookup_l2s(missing)
-        load_keys, objs = self.reserve_load(missing, max(l2_hits, default=0),
-                                            chunk_nbytes)
+        load_keys, objs = self.reserve_load(
+            missing, max(l2_hits, default=0), chunk_nbytes
+        )
         start = time.perf_counter()
         loaded = self.load_from_l2s(load_keys, objs, l2_hits)
         elapsed = time.perf_counter() - start
@@ -61,22 +64,22 @@ class PrefetchController:
         futures = [l2.submit_lookup(missing) for l2 in self.l2s]
         return [future.result() for future in futures]
 
-    def reserve_load(self, missing: list[ChunkKey], l2_hits: int,
-                     chunk_nbytes: int
-                     ) -> tuple[list[ChunkKey], list[MemoryObj]]:
+    def reserve_load(
+        self, missing: list[ChunkKey], l2_hits: int, chunk_nbytes: int
+    ) -> tuple[list[ChunkKey], list[MemoryObj]]:
         """Allocate temporary L1 slots for up to ``l2_hits`` chunks."""
         load_keys, objs = [], []
         for key in missing[:l2_hits]:
-            obj = self.l1.reserve_write([key], chunk_nbytes,
-                                        is_temporary=True)[key]
+            obj = self.l1.reserve_write([key], chunk_nbytes, is_temporary=True)[key]
             if obj is None:
                 break  # pool full — load only what we could allocate
             load_keys.append(key)
             objs.append(obj)
         return load_keys, objs
 
-    def load_from_l2s(self, load_keys: list[ChunkKey],
-                      objs: list[MemoryObj], l2_hits: list[int]) -> int:
+    def load_from_l2s(
+        self, load_keys: list[ChunkKey], objs: list[MemoryObj], l2_hits: list[int]
+    ) -> int:
         """Fill chunks from L2s, best-hit adapter first. Returns count."""
         if not load_keys:
             return 0
@@ -84,12 +87,18 @@ class PrefetchController:
         for i in sorted(range(len(self.l2s)), key=lambda i: -l2_hits[i]):
             if loaded == len(load_keys) or l2_hits[i] <= loaded:
                 break
-            loaded += self.l2s[i].submit_load(load_keys[loaded:],
-                                              objs[loaded:]).result()
+            loaded += (
+                self.l2s[i].submit_load(load_keys[loaded:], objs[loaded:]).result()
+            )
         return loaded
 
-    def resolve(self, request_id: str, l1_keys: list[ChunkKey],
-                loaded_keys: list[ChunkKey], gbps: float) -> None:
+    def resolve(
+        self,
+        request_id: str,
+        l1_keys: list[ChunkKey],
+        loaded_keys: list[ChunkKey],
+        gbps: float,
+    ) -> None:
         """Publish the result and hold read locks on every hit chunk.
 
         If the session already ended (connector raced us), just release.
@@ -102,8 +111,9 @@ class PrefetchController:
                 return
         self.l1.finish_read(hit_keys)
 
-    def start_session(self, request_id: str, keys: list[ChunkKey],
-                      chunk_nbytes: int | None) -> None:
+    def start_session(
+        self, request_id: str, keys: list[ChunkKey], chunk_nbytes: int | None
+    ) -> None:
         """Register a lookup as pending and enqueue its prefetch job."""
         with self.lock:
             self.hits[request_id] = None
@@ -114,8 +124,7 @@ class PrefetchController:
         with self.lock:
             return self.hits.get(request_id)
 
-    def release(self, request_id: str,
-                keys: list[ChunkKey] | None = None) -> None:
+    def release(self, request_id: str, keys: list[ChunkKey] | None = None) -> None:
         """Drop held read locks (all of them when ``keys`` is None)."""
         with self.lock:
             held = self.held.get(request_id, {})

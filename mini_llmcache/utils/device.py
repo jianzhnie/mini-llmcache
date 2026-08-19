@@ -6,8 +6,9 @@ The same code runs on NVIDIA GPUs (``torch.cuda``), Ascend NPUs
 through the namespace returned by :func:`get_device_module`.
 """
 
-import torch
 from functools import lru_cache
+
+import torch
 from transformers.utils import (
     is_torch_cuda_available,
     is_torch_mlu_available,
@@ -16,6 +17,7 @@ from transformers.utils import (
     is_torch_npu_available,
     is_torch_xpu_available,
 )
+
 
 def get_device_type() -> str:
     """Get the accelerator device type available on this system.
@@ -72,8 +74,8 @@ def get_device_module():
     device_type = get_device_type()
     if device_type == "cpu":
         raise RuntimeError(
-            "mini_llmcache needs a CUDA GPU or an Ascend NPU, "
-            "but neither is available")
+            "mini_llmcache needs a CUDA GPU or an Ascend NPU, but neither is available"
+        )
     return getattr(torch, device_type)
 
 
