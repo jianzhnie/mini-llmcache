@@ -1,15 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
+"""GPU KV cache layout detection and normalization.
+
+Different vLLM builds store the KV cache in different tensor shapes.
+``normalize()`` rewrites them all to a common block-first layout where
+dim 0 indexes blocks, so the transfer pipelines can treat every tensor
+uniformly.
+"""
 import enum
+
+import torch
 
 
 class GPUKVFormat(enum.StrEnum):
+    """vLLM layout names (``NL`` layers are the outer list dimension)."""
+
     FA_BLOCK_FIRST = "NL_X_NB_TWO_BS_NH_HS"
     FA_KV_FIRST = "NL_X_TWO_NB_BS_NH_HS"
     FA_SPLIT = "NL_X_NB_BS_NH_HS"
     MLA = "NL_X_NB_BS_HS"
 
 
-def detect(shape, num_blocks):
+def detect(shape: torch.Size, num_blocks: int) -> GPUKVFormat:
+    """Identify the layout from the shape of one KV tensor."""
     # Note: the block dim may be padded beyond num_blocks (vllm-ascend views
     # raw buffers), so only shape[0] == 2 decides FA_KV_FIRST below.
     if len(shape) == 5 and shape[0] == num_blocks and shape[1] == 2:
@@ -25,7 +37,9 @@ def detect(shape, num_blocks):
     raise ValueError(f"unsupported KV layout {tuple(shape)}")
 
 
-def normalize(tensors, num_blocks):
+def normalize(tensors: list[torch.Tensor],
+              num_blocks: int) -> list[torch.Tensor]:
+    """Return tensors in block-first layout (dim 0 = block index)."""
     fmt = detect(tensors[0].shape, num_blocks)
     if fmt is GPUKVFormat.FA_KV_FIRST:
         return [t.movedim(1, 0) for t in tensors]

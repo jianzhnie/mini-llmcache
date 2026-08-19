@@ -36,6 +36,9 @@ Repository = "https://gitee.com/jianzhnie/mini-llmcache"
 Issues = "https://gitee.com/jianzhnie/mini-llmcache/issues"
 
 [project.optional-dependencies]
+test = [
+    "pytest",
+]
 all = [
     "vllm>=0.7.0",
     "vllm-ascend>=0.7.3",

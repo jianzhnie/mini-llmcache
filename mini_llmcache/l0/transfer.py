@@ -1,7 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
+"""In-process GPU<->host transfer engine (runs inside the vLLM process).
+
+``KVTransfer`` holds direct references to the engine's KV tensors and
+moves blocks between the GPU and pinned host memory with a two-stream,
+three-buffer pipeline: while one chunk is being copied, the previous one
+is still being consumed by the kernel stream.  Only bytes cross the
+process boundary (over ZMQ) — the cache server never touches the GPU.
+"""
 import threading
 from concurrent.futures import Future
 
+import numpy as np
 import torch
 
 from mini_llmcache.l0.device import DEV
@@ -21,7 +30,8 @@ class DeviceFuture:
         self.device_index = device_index
         self.done_event = done_event
 
-    def done(self):
+    def done(self) -> bool:
+        """True once the message arrived AND the GPU work is complete."""
         if not self.future.done():
             return False
         if self.done_event is not None:
@@ -32,12 +42,15 @@ class DeviceFuture:
 class Pipeline:
     """Two streams + three staging buffers: overlap kernel work and copies.
 
-    Runs inside the vLLM process — KV tensors are referenced directly, no
-    cross-process memory sharing is needed (which Ascend NPU cannot do).
+    ``kernel_stream`` runs the block gather/scatter kernels (``index_select``
+    / ``index_copy_``); ``copy_stream`` runs the DMA between the device
+    staging buffers and the pinned host buffers.  ``ready``/``free`` events
+    pair the two per staging slot, so slot i's kernel work overlaps slot
+    i-1's copy.
     """
 
-    def __init__(self, kv_caches, blocks_per_chunk, block_nbytes,
-                 chunk_nbytes):
+    def __init__(self, kv_caches: list[torch.Tensor], blocks_per_chunk: int,
+                 block_nbytes: int, chunk_nbytes: int):
         device = kv_caches[0].device
         self.lock = threading.Lock()
         self.kernel_stream = DEV.Stream(device)
@@ -48,7 +61,8 @@ class Pipeline:
                                      pin_memory=True) for _ in range(3)]
         self.ready = [DEV.Event() for _ in range(3)]
         self.free = [DEV.Event() for _ in range(3)]
-        self.layer_views = []
+        #: Per staging slot, per layer: a typed view of the chunk bytes.
+        self.layer_views: list[list[torch.Tensor]] = []
         for buf in self.staging:
             chunk = buf.view(len(kv_caches), blocks_per_chunk, block_nbytes)
             views = []
@@ -60,10 +74,11 @@ class Pipeline:
 
 
 class KVTransfer:
-    def __init__(self, kv_caches, block_size, chunk_size, rank):
+    def __init__(self, kv_caches: list[torch.Tensor], block_size: int,
+                 chunk_size: int, rank: int):
         self.rank = rank
         self.kv_caches = kv_caches
-        self.device = kv_caches[0].device
+        self.device: torch.device = kv_caches[0].device
         self.num_layers = len(kv_caches)
         self.blocks_per_chunk = chunk_size // block_size
         self.block_nbytes = kv_caches[0][0].nbytes
@@ -74,8 +89,10 @@ class KVTransfer:
         self.h2d = Pipeline(kv_caches, self.blocks_per_chunk,
                             self.block_nbytes, self.chunk_nbytes)
 
-    def to_host(self, block_ids) -> tuple[list[bytes], float]:
+    def to_host(self, block_ids: list[int]) -> tuple[list[bytes], float]:
         """Copy the given blocks out of the GPU KV cache into bytes."""
+        assert len(block_ids) % self.blocks_per_chunk == 0, \
+            "block_ids must fill whole chunks"
         n_chunks = len(block_ids) // self.blocks_per_chunk
         block_ids_t = torch.tensor(block_ids, dtype=torch.long,
                                    device=self.device)
@@ -108,8 +125,15 @@ class KVTransfer:
                       for i in range(n_chunks)]
         return chunks, begin.elapsed_time(end) / 1e3
 
-    def from_host(self, chunks: list[bytes], block_ids, skip_blocks=0) -> float:
-        """Scatter the given bytes back into the GPU KV cache."""
+    def from_host(self, chunks: list[bytes], block_ids: list[int],
+                  skip_blocks: int = 0) -> float:
+        """Scatter the given bytes back into the GPU KV cache.
+
+        ``skip_blocks`` blocks of the first chunk are left untouched (the
+        connector has already computed that prefix locally).
+        """
+        assert len(block_ids) % self.blocks_per_chunk == 0, \
+            "block_ids must fill whole chunks"
         block_ids_t = torch.tensor(block_ids, dtype=torch.long,
                                    device=self.device)
         pipe = self.h2d
@@ -122,8 +146,10 @@ class KVTransfer:
                     # The previous use of this host buffer must be fully
                     # consumed before we overwrite it with new data.
                     pipe.free[buf].synchronize()
-                pipe.cpu_bufs[buf].copy_(torch.frombuffer(blob,
-                                                          dtype=torch.uint8))
+                # Direct CPU-side byte copy (avoids torch's read-only-buffer
+                # warning that torch.frombuffer triggers).
+                pipe.cpu_bufs[buf].numpy()[:] = np.frombuffer(blob,
+                                                              dtype=np.uint8)
                 skip = skip_blocks if i == 0 else 0
                 ids = block_ids_t[i * self.blocks_per_chunk + skip:
                                   (i + 1) * self.blocks_per_chunk]
