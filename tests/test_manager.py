@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the L1 manager's lock protocol."""
+
 from mini_llmcache.l1.manager import L1Manager, Listener
 from mini_llmcache.l1.memory import PoolAllocator
 from mini_llmcache.protocol import ChunkKey

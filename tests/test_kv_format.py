@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for KV layout detection and normalization."""
+
 import pytest
 
 from mini_llmcache.l0.kv_format import GPUKVFormat, detect, normalize

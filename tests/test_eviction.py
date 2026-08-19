@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the LRU policy."""
+
 from mini_llmcache.l1.eviction import LRUPolicy
 from mini_llmcache.protocol import ChunkKey
 

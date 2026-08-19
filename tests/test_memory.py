@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the L1 pool allocator."""
-import pytest
 
-from mini_llmcache.l1.memory import MemoryObj, PoolAllocator
+from mini_llmcache.l1.memory import PoolAllocator
 
 
 def test_allocate_returns_distinct_slices():

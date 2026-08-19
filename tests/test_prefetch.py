@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for lookup/prefetch orchestration against a mock L2."""
-import torch
 
-from mini_llmcache.utils.hasher import chunk_hashes
+import torch
+from conftest import wait_until
+
 from mini_llmcache.l1.manager import L1Manager
 from mini_llmcache.l1.memory import MemoryObj, PoolAllocator
 from mini_llmcache.l1.prefetch_controller import PrefetchController
 from mini_llmcache.l2.mock import MockAdapter
 from mini_llmcache.protocol import ChunkKey
-from conftest import wait_until
+from mini_llmcache.utils.hasher import chunk_hashes
 
 CHUNK_SIZE = 4
 CHUNK_NBYTES = 16
@@ -16,8 +17,7 @@ MODEL = "test-model"
 
 
 def keys_for(tokens: list[int]) -> list[ChunkKey]:
-    return [ChunkKey(h, MODEL, 0)
-            for h in chunk_hashes(tokens, CHUNK_SIZE)]
+    return [ChunkKey(h, MODEL, 0) for h in chunk_hashes(tokens, CHUNK_SIZE)]
 
 
 def make_controller(l2: MockAdapter) -> tuple[PrefetchController, L1Manager]:
@@ -27,8 +27,7 @@ def make_controller(l2: MockAdapter) -> tuple[PrefetchController, L1Manager]:
 
 
 def preload_l2(l2: MockAdapter, keys: list[ChunkKey]) -> None:
-    objs = [MemoryObj(torch.empty(CHUNK_NBYTES, dtype=torch.uint8), 0)
-            for _ in keys]
+    objs = [MemoryObj(torch.empty(CHUNK_NBYTES, dtype=torch.uint8), 0) for _ in keys]
     l2.submit_store(keys, objs).result()
 
 

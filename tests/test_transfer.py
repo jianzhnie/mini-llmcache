@@ -5,36 +5,43 @@ These run only when a CUDA GPU or Ascend NPU is available (in the
 vllm-ascend container they exercise the real NPU path); elsewhere the
 module is skipped.
 """
+
 import pytest
 import torch
 
-from mini_llmcache.utils.device import (  # noqa: E402
+from mini_llmcache.utils.device import (
     get_device_module,
     is_device_available,
 )
 
 try:
-    from mini_llmcache.l0.transfer import KVTransfer  # noqa: E402
+    from mini_llmcache.l0.transfer import KVTransfer
 except RuntimeError:  # no accelerator — the whole module gets skipped
     KVTransfer = None
 
 pytestmark = pytest.mark.skipif(
     KVTransfer is None or not is_device_available(),
-    reason="no CUDA GPU or Ascend NPU available")
+    reason="no CUDA GPU or Ascend NPU available",
+)
 
 device_module = get_device_module() if is_device_available() else None
 
 
-def make_transfer(num_layers=2, num_blocks=8, block_shape=(4, 3),
-                  block_size=2, chunk_size=4):
+def make_transfer(
+    num_layers=2, num_blocks=8, block_shape=(4, 3), block_size=2, chunk_size=4
+):
     """Build a KVTransfer over small fake KV tensors.
 
     block_nbytes = 4*3*2 = 24 bytes; blocks_per_chunk = 2;
     chunk_nbytes = 2 layers * 2 blocks * 24 = 96 bytes.
     """
     kv_caches = [
-        torch.empty(num_blocks, *block_shape, dtype=torch.float16,
-                    device=device_module.current_device())
+        torch.empty(
+            num_blocks,
+            *block_shape,
+            dtype=torch.float16,
+            device=device_module.current_device(),
+        )
         for _ in range(num_layers)
     ]
     return KVTransfer(kv_caches, block_size, chunk_size, rank=0), kv_caches
@@ -95,7 +102,7 @@ def test_to_host_preserves_chunk_order_with_many_chunks():
     staging buffers (each chunk's bytes are extracted on its own)."""
     transfer, kv_caches = make_transfer(num_blocks=8)
     for b in range(8):
-        for layer, kv in enumerate(kv_caches):
+        for kv in kv_caches:
             kv[b].fill_(float(b))
     chunks, _ = transfer.to_host(list(range(8)))  # 4 chunks
     assert len(chunks) == 4

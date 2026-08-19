@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the ZMQ RPC layer."""
+
 import pytest
 
 from mini_llmcache.mq import MQClient, MQServer
@@ -54,7 +55,7 @@ def test_unknown_request_raises_on_client(client_server):
 def test_call_timeout_raises_when_server_is_missing(free_port):
     client = MQClient(f"tcp://127.0.0.1:{free_port}")
     try:
-        with pytest.raises(Exception):
+        with pytest.raises(TimeoutError):
             # Nothing is listening; the call must not hang forever.
             client.call(ECHO, None, timeout=1.0)
     finally:
