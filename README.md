@@ -1,11 +1,8 @@
 # mini-llmcache
 
-[LMCache](https://github.com/LMCache/LMCache) 的迷你教学版:约 870 行 Python 实现一个 **LLM KV Cache 共享系统**——
-把模型算过的"草稿"存起来,下次遇到同样的 prompt 开头直接抄,**实测 prefill 加速 19.4×**。
+mini-llmcache 是 [LMCache](https://github.com/LMCache/LMCache) 的迷你教学版， 实现了一个 **LLM KV Cache 共享系统**，为 vLLM 挂载一个独立的 KV Cache 缓存服务器, 把 LLM 算过的 prompt"草稿"按 256 token 切块哈希后存进 L1 内存 / L2 磁盘,下次遇到相同前缀直接取回、跳过 prefill(实测 19.4× 加速), 支持 NVIDIA GPU(torch.cuda)与 Ascend NPU(torch.npu)双平台。
 
-支持 NVIDIA GPU(torch.cuda)与 Ascend NPU(torch.npu)双平台;Ascend 适配细节见 [docs/ascend_env.md](docs/ascend_env.md)。
-
-## quickstart
+## Quick Start
 
 ```bash
 # 1. 起缓存服务器(L1 8GB,L2 落盘到 /tmp/mini-l2)
