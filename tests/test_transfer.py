@@ -8,24 +8,21 @@ module is skipped.
 import pytest
 import torch
 
+from mini_llmcache.utils.device import (  # noqa: E402
+    get_device_module,
+    is_device_available,
+)
 
-def _device_available() -> bool:
-    try:
-        from mini_llmcache.utils.device import get_device_module
+try:
+    from mini_llmcache.l0.transfer import KVTransfer  # noqa: E402
+except RuntimeError:  # no accelerator — the whole module gets skipped
+    KVTransfer = None
 
-        get_device_module().current_device()
-        return True
-    except (RuntimeError, ImportError, AttributeError):
-        return False
+pytestmark = pytest.mark.skipif(
+    KVTransfer is None or not is_device_available(),
+    reason="no CUDA GPU or Ascend NPU available")
 
-
-pytestmark = pytest.mark.skipif(not _device_available(),
-                                reason="no CUDA GPU or Ascend NPU available")
-
-from mini_llmcache.l0.transfer import KVTransfer  # noqa: E402
-from mini_llmcache.utils.device import get_device_module  # noqa: E402
-
-DEV = get_device_module()
+device_module = get_device_module() if is_device_available() else None
 
 
 def make_transfer(num_layers=2, num_blocks=8, block_shape=(4, 3),
@@ -37,7 +34,7 @@ def make_transfer(num_layers=2, num_blocks=8, block_shape=(4, 3),
     """
     kv_caches = [
         torch.empty(num_blocks, *block_shape, dtype=torch.float16,
-                    device=DEV.current_device())
+                    device=device_module.current_device())
         for _ in range(num_layers)
     ]
     return KVTransfer(kv_caches, block_size, chunk_size, rank=0), kv_caches

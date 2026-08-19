@@ -16,7 +16,7 @@ import torch
 from mini_llmcache.utils.device import get_device_module
 
 #: Active accelerator namespace; raises a clear error on CPU-only machines.
-DEV = get_device_module()
+device_module = get_device_module()
 
 
 class DeviceFuture:
@@ -56,14 +56,14 @@ class Pipeline:
                  block_nbytes: int, chunk_nbytes: int):
         device = kv_caches[0].device
         self.lock = threading.Lock()
-        self.kernel_stream = DEV.Stream(device)
-        self.copy_stream = DEV.Stream(device)
+        self.kernel_stream = device_module.Stream(device)
+        self.copy_stream = device_module.Stream(device)
         self.staging = torch.empty(3, chunk_nbytes, dtype=torch.uint8,
                                    device=device)
         self.cpu_bufs = [torch.empty(chunk_nbytes, dtype=torch.uint8,
                                      pin_memory=True) for _ in range(3)]
-        self.ready = [DEV.Event() for _ in range(3)]
-        self.free = [DEV.Event() for _ in range(3)]
+        self.ready = [device_module.Event() for _ in range(3)]
+        self.free = [device_module.Event() for _ in range(3)]
         #: Per staging slot, per layer: a typed view of the chunk bytes.
         self.layer_views: list[list[torch.Tensor]] = []
         for buf in self.staging:
@@ -100,28 +100,28 @@ class KVTransfer:
         block_ids_t = torch.tensor(block_ids, dtype=torch.long,
                                    device=self.device)
         pipe = self.d2h
-        with pipe.lock, DEV.device(self.device):
+        with pipe.lock, device_module.device(self.device):
             # Freeze all device work before reading the KV blocks
             # (portable replacement for a producer event).
-            DEV.synchronize()
-            begin = DEV.Event(enable_timing=True)
+            device_module.synchronize()
+            begin = device_module.Event(enable_timing=True)
             begin.record(pipe.kernel_stream)
             for i in range(n_chunks):
                 buf = i % 3
                 ids = block_ids_t[i * self.blocks_per_chunk:
                                   (i + 1) * self.blocks_per_chunk]
-                with DEV.stream(pipe.kernel_stream):
+                with device_module.stream(pipe.kernel_stream):
                     pipe.kernel_stream.wait_event(pipe.free[buf])
                     for layer, kv_cache in enumerate(self.kv_caches):
                         torch.index_select(kv_cache, 0, ids,
                                            out=pipe.layer_views[buf][layer])
                     pipe.ready[buf].record(pipe.kernel_stream)
-                with DEV.stream(pipe.copy_stream):
+                with device_module.stream(pipe.copy_stream):
                     pipe.copy_stream.wait_event(pipe.ready[buf])
                     pipe.cpu_bufs[buf].copy_(pipe.staging[buf],
                                              non_blocking=True)
                     pipe.free[buf].record(pipe.copy_stream)
-            end = DEV.Event(enable_timing=True)
+            end = device_module.Event(enable_timing=True)
             end.record(pipe.copy_stream)
             pipe.copy_stream.synchronize()
             chunks = [pipe.cpu_bufs[i % 3].numpy().tobytes()
@@ -140,8 +140,8 @@ class KVTransfer:
         block_ids_t = torch.tensor(block_ids, dtype=torch.long,
                                    device=self.device)
         pipe = self.h2d
-        with pipe.lock, DEV.device(self.device):
-            begin = DEV.Event(enable_timing=True)
+        with pipe.lock, device_module.device(self.device):
+            begin = device_module.Event(enable_timing=True)
             begin.record(pipe.copy_stream)
             for i, blob in enumerate(chunks):
                 buf = i % 3
@@ -156,18 +156,18 @@ class KVTransfer:
                 skip = skip_blocks if i == 0 else 0
                 ids = block_ids_t[i * self.blocks_per_chunk + skip:
                                   (i + 1) * self.blocks_per_chunk]
-                with DEV.stream(pipe.copy_stream):
+                with device_module.stream(pipe.copy_stream):
                     pipe.copy_stream.wait_event(pipe.free[buf])
                     pipe.staging[buf].copy_(pipe.cpu_bufs[buf],
                                             non_blocking=True)
                     pipe.ready[buf].record(pipe.copy_stream)
-                with DEV.stream(pipe.kernel_stream):
+                with device_module.stream(pipe.kernel_stream):
                     pipe.kernel_stream.wait_event(pipe.ready[buf])
                     for layer, kv_cache in enumerate(self.kv_caches):
                         kv_cache.index_copy_(
                             0, ids, pipe.layer_views[buf][layer][skip:])
                     pipe.free[buf].record(pipe.kernel_stream)
-            end = DEV.Event(enable_timing=True)
+            end = device_module.Event(enable_timing=True)
             end.record(pipe.kernel_stream)
             # Guarantee the scatter is complete before the caller marks
             # this transfer as finished (vLLM will read these blocks).

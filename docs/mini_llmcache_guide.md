@@ -387,7 +387,7 @@ hash[i] = BLAKE3(hash[i-1] + tokens_of_chunk_i)   # hash[0] 从 NONE_HASH 起步
 | `set_device` | 43 | 按 `device.type` 分发到对应加速器的 `set_device` |
 | `get_device_module` | 58 | 返回活动加速器的 torch 命名空间(`torch.npu` / `torch.cuda` / ...);无加速器时抛出清晰的 `RuntimeError` |
 
-消费者(transfer、connector)在模块顶层执行 `DEV = get_device_module()`——所有设备相关代码(stream/event/同步)都通过这个命名空间,上层一行都不用改,换加速器也一行都不用动。
+消费者(transfer、connector)在模块顶层执行 `device_module = get_device_module()`(结果已 `lru_cache` 缓存,探测只做一次)——所有设备相关代码(stream/event/同步)都通过这个命名空间,上层一行都不用改,换加速器也一行都不用动。
 
 **`l0/kv_format.py`(48 行)** — 不同 vLLM 版本的 KV 张量形状不同,`detect`(23)按形状识别四种布局:
 

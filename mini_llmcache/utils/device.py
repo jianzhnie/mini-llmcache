@@ -7,6 +7,7 @@ through the namespace returned by :func:`get_device_module`.
 """
 
 import torch
+from functools import lru_cache
 from transformers.utils import (
     is_torch_cuda_available,
     is_torch_mlu_available,
@@ -59,9 +60,11 @@ def set_device(device: torch.device) -> None:
         raise ValueError(f"unsupported device type: {dtype}")
 
 
+@lru_cache(maxsize=1)
 def get_device_module():
     """Get the torch device namespace (torch.npu / torch.cuda / ...) for
-    the active accelerator.
+    the active accelerator.  Cached: the accelerator never changes during
+    a process lifetime.
 
     Raises:
         RuntimeError: when no accelerator is available.
@@ -72,3 +75,12 @@ def get_device_module():
             "mini_llmcache needs a CUDA GPU or an Ascend NPU, "
             "but neither is available")
     return getattr(torch, device_type)
+
+
+def is_device_available() -> bool:
+    """Return True when an accelerator (NPU/CUDA/XPU/...) is usable."""
+    try:
+        get_device_module().current_device()
+        return True
+    except (RuntimeError, ImportError, AttributeError):
+        return False
