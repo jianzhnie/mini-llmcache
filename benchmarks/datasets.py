@@ -93,9 +93,18 @@ def make_no_reuse(
     n_prompts: int = 4,
     docs: tuple[str, ...] = ("fungi", "rocks", "ships", "weather"),
 ) -> dict:
-    """``n_prompts`` distinct same-length prompts (all cold)."""
+    """n_prompts distinct same-length prompts (all cold).
+
+    Each prompt gets a distinct header so the first chunk (and therefore
+    the whole hash chain) differs from anything the other scenarios cached.
+    """
+    headers = ("Intro: ", "Chapter 1: ", "Note: ", "Part II: ", "Preface: ",
+               "Q: ", "Summary: ", "Draft: ", "Index: ", "Appendix: ")
+    # n_prompts distinct prompts: unique header + doc combination so no two
+    # share a first chunk (hash chains fully disjoint).
     prompts = [
-        repeat_to_tokens(tok, DOCUMENTS[docs[i % len(docs)]], n_chunks * CHUNK_TOKENS)
+        headers[i] + repeat_to_tokens(tok, DOCUMENTS[docs[i % len(docs)]],
+                                      n_chunks * CHUNK_TOKENS)
         for i in range(n_prompts)
     ]
     return {"prompts": prompts, "tokens": n_chunks * CHUNK_TOKENS}

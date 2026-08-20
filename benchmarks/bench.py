@@ -35,10 +35,12 @@ if __package__ in {None, ""}:
 
 from benchmarks.datasets import (
     CHUNK_TOKENS,
+    DOCUMENTS,
     SUFFIXES,
     make_exact_repeat,
     make_no_reuse,
     make_shared_prefix,
+    repeat_to_tokens,
 )
 from benchmarks.datasets_hf import load_100
 
@@ -133,62 +135,79 @@ def print_row(
     )
 
 
-def run_exact_repeat(url: str, model: str, ds: dict, server_log: Path | None) -> None:
+def run_exact_repeat(url: str, model: str, tok: PreTrainedTokenizer,
+                     ds: dict, server_log: Path | None) -> None:
+    """Scenario 1 (manual §1): 5 cold (distinct docs) + 10 hot (repeat)."""
     (prompt,) = ds["prompts"]
     n = ds["tokens"] // CHUNK_TOKENS
-    print(f"\n== 场景 1 · 完全重复命中({ds['tokens']} tokens,{n} chunks)==")
-    cold_ttft, cold_total, cold = complete(url, model, prompt)
-    print_row(
-        "exact_repeat", "cold", cold_ttft, cold_total, server_hits(server_log, cold)
-    )
-    warm_ttft, warm_total, warm = complete(url, model, prompt)
-    print_row(
-        "exact_repeat",
-        "warm",
-        warm_ttft,
-        warm_total,
-        server_hits(server_log, warm),
-        f"{cold_ttft / warm_ttft:.1f}x",
-    )
-    same = cold["text"] == warm["text"]
-    print(
-        f"  输出一致性: {'一致 ✓' if same else '不一致 ✗'}  "
-        f"TTFT 加速 {cold_ttft / warm_ttft:.1f}x"
-    )
+    print(f"\n== 场景 1 · 完全重复命中({ds['tokens']} tokens,{n} chunks)"
+          f"| 5 冷 + 10 热 ==")
+    cold_ttfts, cold_texts = [], []
+    for doc in ("rocks", "fungi", "weather", "insects", "plants"):
+        cold_prompt = repeat_to_tokens(tok, DOCUMENTS[doc], ds["tokens"])
+        ttft, _, resp = complete(url, model, cold_prompt)
+        cold_ttfts.append(ttft)
+        cold_texts.append(resp["text"])
+    hot_ttfts, hot_texts = [], []
+    for _ in range(10):
+        ttft, _, resp = complete(url, model, prompt)
+        hot_ttfts.append(ttft)
+        hot_texts.append(resp["text"])
+    # Same prompt repeated 10x must produce identical output (hot self-consistency);
+    # the 5 cold samples are distinct documents, used only as a latency baseline.
+    consistent = len(set(hot_texts)) == 1
+    hits = server_hits(server_log, {"id": resp.get("id", "")})
+    summarize("exact_repeat", cold_ttfts, hot_ttfts, hits, consistent)
 
 
-def run_shared_prefix(url: str, model: str, ds: dict, server_log: Path | None) -> None:
+def run_shared_prefix(url: str, model: str, tok: PreTrainedTokenizer,
+                       ds: dict, server_log: Path | None) -> None:
+    """Scenario 2 (manual §2): 5 cold + 4 suffixes x 3 rounds + baseline."""
     prompts = ds["prompts"]
     print(
         f"\n== 场景 2 · 共享前缀({ds['prefix_tokens']} token 前缀,"
-        f"{len(prompts)} 个不同后缀)=="
+        f"{len(prompts)} 个后缀 × 3 轮 + 5 冷)=="
     )
-    ttft, total, resp = complete(url, model, prompts[0])
-    print_row("prefix-s0", "cold", ttft, total, server_hits(server_log, resp))
-    warm_ttfts = []
-    for i, prompt in enumerate(prompts[1:], start=1):
-        ttft, total, resp = complete(url, model, prompt)
-        warm_ttfts.append(ttft)
-        print_row(f"prefix-s{i}", "warm", ttft, total, server_hits(server_log, resp))
-    cold_ttft, cold_total, resp = complete(url, model, ds["baseline"])
-    print_row("baseline", "cold", cold_ttft, cold_total, server_hits(server_log, resp))
-    avg = sum(warm_ttfts) / len(warm_ttfts)
-    print(
-        f"  前缀命中平均 TTFT {avg:.3f}s vs 同长度冷启动 {cold_ttft:.3f}s "
-        f"→ 加速 {cold_ttft / avg:.1f}x"
-    )
+    # Warm the prefix once so subsequent rounds hit L1.
+    complete(url, model, prompts[0])
+    cold_ttfts = []
+    for doc in ("rocks", "fungi", "weather", "insects", "plants"):
+        prompt = repeat_to_tokens(
+            tok, DOCUMENTS[doc], ds["prefix_tokens"] + len(tok.encode(SUFFIXES[0])))
+        ttft, _, _ = complete(url, model, prompt)
+        cold_ttfts.append(ttft)
+    hot_ttfts, consistent = [], True
+    first_texts = {}
+    for round_no in range(3):
+        for i, prompt in enumerate(prompts):
+            ttft, _, resp = complete(url, model, prompt)
+            hot_ttfts.append(ttft)
+            if round_no == 0:
+                first_texts[i] = resp["text"]
+            elif resp["text"] != first_texts[i]:
+                consistent = False
+    baseline_ttft, _, _ = complete(url, model, ds["baseline"])
+    cold_ttfts.append(baseline_ttft)  # same-length different-content reference
+    hits = server_hits(server_log, {"id": resp.get("id", "")})
+    summarize("shared_prefix", cold_ttfts, hot_ttfts, hits, consistent)
 
 
 def run_no_reuse(url: str, model: str, ds: dict, server_log: Path | None) -> None:
+    """Scenario 3 (manual §3): 5 docs x 2 rounds = 10 cold samples."""
+    prompts = ds["prompts"]
     print(
-        f"\n== 场景 3 · 无复用基线({ds['tokens']} tokens × {len(ds['prompts'])} 条)=="
+        f"\n== 场景 3 · 无复用基线({ds['tokens']} tokens × {len(prompts)} 条 × 2 轮)=="
     )
     ttfts = []
-    for i, prompt in enumerate(ds["prompts"]):
-        ttft, total, resp = complete(url, model, prompt)
+    for i, prompt in enumerate(prompts):
+        ttft, _, resp = complete(url, model, prompt)
         ttfts.append(ttft)
-        print_row(f"no_reuse-{i}", "cold", ttft, total, server_hits(server_log, resp))
-    print(f"  冷启动平均 TTFT {sum(ttfts) / len(ttfts):.3f}s")
+        if i < 4:
+            print_row(f"no_reuse-{i}", "cold", ttft, 0.0,
+                      server_hits(server_log, resp))
+    hits = server_hits(server_log, {"id": resp.get("id", "")})
+    summarize("no_reuse", ttfts, [], hits)
+    print(f"  冷基线 p50={p50(ttfts):.3f}s p90={p90(ttfts):.3f}s")
 
 
 def run_hf100(
@@ -254,6 +273,39 @@ def chunk_mb(server_log: Path | None) -> float | None:
         if "REGISTER" in line and "chunk=" in line:
             return float(line.split("chunk=")[1].split(" ")[0])
     return None
+
+
+def run_incremental(url: str, model: str, tok: PreTrainedTokenizer,
+                     server_log: Path | None) -> None:
+    """Scenario 6 (manual §6): multi-turn chain growth.
+
+    Round k prompt = base(3072t) + "Turn 1. ... Turn k. "; each round twice.
+    Each round must STORE only its new chunk and RETRIEVE all previous.
+    """
+    from benchmarks.datasets import DOCUMENTS, repeat_to_tokens
+
+    base = repeat_to_tokens(tok, DOCUMENTS["birds"], 12 * 256)
+    rounds = [base + "".join(f"Turn {j}. " for j in range(1, k + 1))
+              for k in range(1, 7)]
+    print(f"\n== 场景 6 · 多轮增量({len(rounds)} 轮,末轮 "
+          f"{len(tok.encode(rounds[-1]))} tokens)==")
+    complete(url, model, rounds[0])  # warm: compute + cache round 1
+    cold_ttfts = [complete(url, model, r)[0] for r in rounds]
+    hot_ttfts, first_texts, consistent = [], {}, True
+    for rnd in range(2):
+        for i, prompt in enumerate(rounds):
+            ttft, _, resp = complete(url, model, prompt)
+            hot_ttfts.append(ttft)
+            if rnd == 0:
+                first_texts[i] = resp["text"]
+            elif resp["text"] != first_texts[i]:
+                consistent = False
+    hits = server_hits(server_log, {"id": resp.get("id", "")})
+    summarize("incremental", cold_ttfts, hot_ttfts, hits, consistent)
+    for i in range(len(rounds)):
+        c = cold_ttfts[i]
+        h = p50(hot_ttfts[i::len(rounds)])
+        print(f"  round {i + 1}: {c / h:.2f}x (chain {12 + i} chunks)")
 
 
 def run_throughput(
@@ -347,6 +399,7 @@ def main() -> None:
         run_exact_repeat(
             args.url,
             args.model,
+            tok,
             make_exact_repeat(tok, n_chunks=LONG_CHUNKS, doc="ships"),
             server_log,
         )
@@ -354,6 +407,7 @@ def main() -> None:
         run_shared_prefix(
             args.url,
             args.model,
+            tok,
             make_shared_prefix(tok, args.prefix_chunks, doc="birds"),
             server_log,
         )
@@ -364,7 +418,8 @@ def main() -> None:
             make_no_reuse(
                 tok,
                 n_chunks=LONG_CHUNKS,
-                docs=("fungi", "weather", "insects", "plants"),
+                n_prompts=10,
+                docs=("birds",) * 10,
             ),
             server_log,
         )
@@ -372,6 +427,8 @@ def main() -> None:
         run_hf100(args.url, args.model, tok, server_log)
     if "5" in wanted:
         run_throughput(args.url, args.model, tok, server_log, args.throughput_n)
+    if "6" in wanted:
+        run_incremental(args.url, args.model, tok, server_log)
 
 
 if __name__ == "__main__":

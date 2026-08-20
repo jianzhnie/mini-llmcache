@@ -174,7 +174,6 @@ python benchmarks/bench.py ... --scenarios 5 --throughput-n 20 --chunks 12
 **执行**:
 
 ```bash
-# 待实现:bench.py 新增 --scenarios 6
 python benchmarks/bench.py ... --scenarios 6 --chunks 12
 ```
 
@@ -197,8 +196,7 @@ python benchmarks/bench.py ... --scenarios 6 --chunks 12
 **执行**:
 
 ```bash
-# 待实现:benchmarks/concurrent.py
-python benchmarks/concurrent.py --url http://localhost:8000 --model ... \
+python benchmarks/concurrent_bench.py --url http://localhost:8000 --model ... \
     --workers 4 --rounds 5 --chunks 12
 ```
 
