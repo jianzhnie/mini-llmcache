@@ -121,6 +121,7 @@ while transfer cost grows only with KV bytes.
 |---|---|
 | [docs/mini_llmcache_guide.md](docs/mini_llmcache_guide.md) | Complete walkthrough (in Chinese): overview → execution flow → MiniConnector breakdown → getting-started map |
 | [docs/ascend_env.md](docs/ascend_env.md) | Ascend NPU adaptation record + full test report (in Chinese) |
+| [docs/benchmark_design.md](docs/benchmark_design.md) | Benchmark design: 8-scenario system, metrics, config matrix, execution flow |
 
 ## Tests
 
