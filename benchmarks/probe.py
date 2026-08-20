@@ -9,8 +9,13 @@ for a prefix the live engine has already cached.
         --model /path/to/model --chunk-mb 32 --prompt-chunks 12
 """
 import argparse
+import sys
 import time
+from pathlib import Path
 from typing import Any
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from mini_llmcache.mq import MQClient
 from mini_llmcache.protocol import (

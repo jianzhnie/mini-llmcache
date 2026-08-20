@@ -22,12 +22,16 @@ For honest numbers, start with a FRESH cache server (empty L1 and L2).
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 import requests
 from transformers import AutoTokenizer, PreTrainedTokenizer
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from benchmarks.datasets import (
     CHUNK_TOKENS,
@@ -90,6 +94,34 @@ def server_hits(server_log: Path | None, response: dict) -> str:
                 return line.split("] ", 1)[-1]
             ack = line.split("] ", 1)[-1]
     return ack or "(no RETRIEVE — computed from scratch)"
+
+
+def pct(values: list[float], q: float) -> float:
+    """Percentile of a sample (linear interpolation, numpy-free)."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    k = (len(ordered) - 1) * q
+    lo, hi = int(k), min(int(k) + 1, len(ordered) - 1)
+    return ordered[lo] + (ordered[hi] - ordered[lo]) * (k - lo)
+
+
+def p50(values: list[float]) -> float:
+    return pct(values, 0.5)
+
+
+def p90(values: list[float]) -> float:
+    return pct(values, 0.9)
+
+
+def summarize(name: str, cold: list[float], hot: list[float], hits: str,
+              consistent: bool = True) -> None:
+    """Print the manual's summary row: samples, p50/p90, speedup."""
+    speedup = p50(cold) / p50(hot) if hot and p50(hot) > 0 else 0.0
+    print(f"{name}: cold n={len(cold)} p50={p50(cold):.3f}s p90={p90(cold):.3f}s | "
+          f"hot n={len(hot)} p50={p50(hot):.3f}s p90={p90(hot):.3f}s | "
+          f"speedup {speedup:.2f}x | {hits} | consistent={'✓' if consistent else '✗'}")
+    return speedup
 
 
 def print_row(

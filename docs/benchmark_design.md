@@ -1,10 +1,10 @@
 # mini-llmcache Benchmark 指导手册
 
 > 本文是 benchmark 的**操作手册**:按场景执行、按数据量要求收集、按判定规则验收。
-> 对应代码:`benchmarks/`(bench.py / sweep.py / probe.py / datasets*.py)。
+> 对应代码:`benchmarks/`(bench.py / sweep.py / probe.py / datasets\*.py)。
 > 每个场景的数据量要求:**有效样本 ≥10 条**(冷/热分别计数),统计用中位数(抗噪),报告 p50/p90。
 
----
+***
 
 ## 0. 通用规程(每次跑之前必读)
 
@@ -23,13 +23,13 @@
 
 ### 0.3 统计口径(所有场景统一)
 
-| 项 | 规则 |
-|---|---|
-| 有效样本 | 每条 = 一次独立请求;冷/热各计数 |
+| 项      | 规则                                        |
+| ------ | ----------------------------------------- |
+| 有效样本   | 每条 = 一次独立请求;冷/热各计数                        |
 | 每场景数据量 | **冷 ≥5 条,热 ≥5 条(合计 ≥10)**;长场景(吞吐/多轮)按节内要求 |
-| 统计量 | 中位数(p50)为主,报告 p90;均值仅作参考 |
-| 加速比 | `median(cold) / median(hot)` |
-| 输出一致性 | 冷热输出逐字节比对,不一致 = 测试失败 |
+| 统计量    | 中位数(p50)为主,报告 p90;均值仅作参考                  |
+| 加速比    | `median(cold) / median(hot)`              |
+| 输出一致性  | 冷热输出逐字节比对,不一致 = 测试失败                      |
 
 ### 0.4 判定总则
 
@@ -37,7 +37,7 @@
 - 加速比 < 0.9× 的"低收益"是**有效结论**,不是失败(记录即可)
 - 每次报告必须附:样本数、p50/p90、命中证据行、环境(模型/配置/commit)
 
----
+***
 
 ## 1. 场景 1 · 完全重复(全命中 + 正确性)
 
@@ -46,10 +46,12 @@
 **构造**:同一长 prompt × N 次(长度取 3072t,可选 8192t/16384t 阶梯)。
 
 **数据量要求**:
+
 - 冷:5 条(5 个**不同文档**的同长 prompt,取 p50 作冷基线,防单条噪声)
 - 热:10 条(同一 prompt 重复 10 次,取 p50)——共 15 次请求
 
 **执行**:
+
 ```bash
 python benchmarks/bench.py --url http://localhost:8000 \
     --model Qwen/Qwen3-32B --tokenizer /path/to/model \
@@ -57,16 +59,18 @@ python benchmarks/bench.py --url http://localhost:8000 \
 ```
 
 **判定**:
+
 - [ ] 热请求全部 `hit L1=11`(3072t 时)+ 冷请求无命中
-- [ ] 输出逐字节一致(cold[0].text == hot[i].text,∀i)
+- [ ] 输出逐字节一致(cold\[0].text == hot\[i].text,∀i)
 - [ ] 报告 `median(cold)/median(hot)` 与 p90
 
 **记录模板**:
+
 ```
 场景1 | model | chunk | L1 | prompt_len | cold_p50 | hot_p50 | speedup | hits | consistent
 ```
 
----
+***
 
 ## 2. 场景 2 · 共享前缀(部分命中)
 
@@ -75,21 +79,24 @@ python benchmarks/bench.py --url http://localhost:8000 \
 **构造**:1 长前缀(3072t)+ 4 个不同后缀;另需 1 条同长不同内容做冷参考。
 
 **数据量要求**:
+
 - 冷:5 条(5 个不同文档,同长)
 - 热:4 后缀 × 3 轮 = 12 条(每后缀 3 次,取 p50)
 - 冷参考:1 条 baseline(同长不同文档)——共 18 次请求
 
 **执行**:
+
 ```bash
 python benchmarks/bench.py ... --scenarios 2 --chunks 12
 ```
 
 **判定**:
+
 - [ ] 热请求全部 `hit L1=10`,无 L2(前缀已驻留)
 - [ ] 输出一致性:同后缀的 3 次输出逐字节一致
 - [ ] 报告 `median(cold_baseline)/median(hot)`
 
----
+***
 
 ## 3. 场景 3 · 无复用基线(纯冷参考)
 
@@ -100,15 +107,17 @@ python benchmarks/bench.py ... --scenarios 2 --chunks 12
 **数据量要求**:**10 条**(5 文档 × 2 轮,取 p50 与 p90)——共 10 次请求。
 
 **执行**:
+
 ```bash
 python benchmarks/bench.py ... --scenarios 3 --chunks 12
 ```
 
 **判定**:
+
 - [ ] 10 条全部无 RETRIEVE(no hit)——若出现命中,说明数据集构造污染,立即修正
 - [ ] 记录 p50/p90 作后续场景的冷基线
 
----
+***
 
 ## 4. 场景 4 · SQuAD 式 100 条(真实问答)
 
@@ -119,16 +128,18 @@ python benchmarks/bench.py ... --scenarios 3 --chunks 12
 **数据量要求**:**100 条全量**(20 冷 + 80 热,全部计入;命中率分母 = 80)。
 
 **执行**:
+
 ```bash
 python benchmarks/bench.py ... --scenarios 4
 ```
 
 **判定**:
+
 - [ ] 命中率 80/80(100%)
 - [ ] 报告 `Σhot_TTFT vs 5×Σcold_TTFT`(TTFT 合计口径)
 - [ ] 预期结论:短上下文下 <1×(传输主导)——如实记录
 
----
+***
 
 ## 5. 场景 5 · 吞吐(共享前缀批量)
 
@@ -139,18 +150,20 @@ python benchmarks/bench.py ... --scenarios 4
 **数据量要求**:**20 条**(1 warm + 19 有效;warm 不计入)。可选加大到 50。
 
 **执行**:
+
 ```bash
 python benchmarks/bench.py ... --scenarios 5 --throughput-n 20 --chunks 12
 ```
 
 **判定**:
+
 - [ ] 19 条有效请求全部 `hit L1=N`(首个请求后)
 - [ ] 双口径:`ΣTTFT` 加速与 `Σ墙钟` 加速分别报告
 - [ ] 32B 参考线:3072t 前缀 ≈ TTFT 1.6× / 墙钟 1.2×;16384t ≈ 1.4×/1.2×
 
----
+***
 
-## 6. 场景 6 · 多轮增量(缓存链延伸)[扩展]
+## 6. 场景 6 · 多轮增量(缓存链延伸)\[扩展]
 
 **目的**:多轮对话形态——每轮新 KV 追加到缓存链,旧 chunk 全部复用。
 
@@ -159,19 +172,21 @@ python benchmarks/bench.py ... --scenarios 5 --throughput-n 20 --chunks 12
 **数据量要求**:**6 轮 × 2 遍 = 12 条**(每轮同 prompt 重复 2 次取 p50;第 1 轮为冷)。另需 5 条同长冷参考(不同文档 4352t)。
 
 **执行**:
+
 ```bash
 # 待实现:bench.py 新增 --scenarios 6
 python benchmarks/bench.py ... --scenarios 6 --chunks 12
 ```
 
 **判定**:
+
 - [ ] 第 k 轮:STORE 只含本轮新增 chunk(1 个),RETRIEVE 覆盖全部旧 chunk(k-1 个)
 - [ ] 每轮 `median(cold_4352t)/median(hot_k)` 加速比单调或持平(不下降)
 - [ ] 输出一致性逐轮验证
 
----
+***
 
-## 7. 场景 7 · 并发共享前缀[扩展]
+## 7. 场景 7 · 并发共享前缀\[扩展]
 
 **目的**:vLLM 批处理下的缓存收益;传输/锁的并发行为。
 
@@ -180,6 +195,7 @@ python benchmarks/bench.py ... --scenarios 6 --chunks 12
 **数据量要求**:**4 并发 × 5 轮 = 20 条**(每轮 4 请求并发发出);重复 3 遍取 p50 总墙钟。
 
 **执行**:
+
 ```bash
 # 待实现:benchmarks/concurrent.py
 python benchmarks/concurrent.py --url http://localhost:8000 --model ... \
@@ -187,59 +203,64 @@ python benchmarks/concurrent.py --url http://localhost:8000 --model ... \
 ```
 
 **判定**:
+
 - [ ] 并发下命中率 100%(无锁竞争导致的丢失)
 - [ ] 报告:总墙钟(并发完成时间)vs 串行 20 条(场景 5)的总墙钟
 - [ ] 单请求 TTFT 分布 p50/p90(观察并发是否放大传输延迟)
 
----
+***
 
-## 8. 场景 8 · 持久化 + 容量[扩展]
+## 8. 场景 8 · 持久化 + 容量\[扩展]
 
 **目的**:L2 跨重启正确性;L1 溢出淘汰的鲁棒性。
 
 **构造**:
+
 - ① 持久化:冷请求 P → 杀掉 server+vllm → 重启 → 同 P(应 L2 命中)
 - ② 容量:L1=1GB + 50 条不同 prompt 冲刷,观察 eviction 与命中率曲线
 
 **数据量要求**:
+
 - ① 持久化:**5 组**(5 个不同 prompt,各冷→重启→热;重启仅一次,热测 5 条取 p50)
 - ② 容量:**50 条**冲刷 + 每 10 条回测 1 次命中率(5 个采样点)
 
 **执行**:
+
 ```bash
 # ① 手工两段式:冷请求 → pkill 两端 → 重启 → 热请求
 # ② python benchmarks/bench.py ... --scenarios 3(50 文档版)
 ```
 
 **判定**:
+
 - [ ] ① 热请求全部 `hit L1=0 L2=N`,延迟 ≤ 1.3× 同长度热命中
 - [ ] ② 命中率曲线平滑下降(无崩溃/卡死);server 日志有 eviction 记录
 
----
+***
 
 ## 9. 配置矩阵
 
-| 维度 | 取值 | 依据(实测) |
-|---|---|---|
-| 模型 | 0.6B / 8B / 32B(TP=2) | 小模型 <1×(验证边界);32B 是主场 |
-| chunk-size | 128 / 256 / 512 / 1024 | 最优 256(128 帧数翻倍;512+ 粒度粗) |
-| L1 | 4 / 8 / 16 GB | 最优 8GB |
-| prompt | 3072 / 8192 / 16384 t | 收益随长度放大(16384t → 1.4×) |
-| 传输 | tcp / ipc:// | ipc 快 ~24%(长前缀) |
-| vLLM 前缀缓存 | 关(主)/ 开(部署对照) | 关闭保证可归因 |
+| 维度         | 取值                          | 依据(实测)                    |
+| ---------- | --------------------------- | ------------------------- |
+| 模型         | 0.6B / 8B / 32B(TP=2)       | 小模型 <1×(验证边界);32B 是主场     |
+| chunk-size | 128 / 256 / 512 / 1024      | 最优 256(128 帧数翻倍;512+ 粒度粗) |
+| L1         | 4 / 8 / 16 GB               | 最优 8GB                    |
+| prompt     | 2048 /4096 / 8192 / 16384 t | 收益随长度放大(16384t → 1.4×)    |
+| 传输         | tcp / ipc://                | ipc 快 \~24%(长前缀)          |
+| vLLM 前缀缓存  | 关(主)/ 开(部署对照)               | 关闭保证可归因                   |
 
 **推荐默认**:32B(TP2)、chunk=256、L1=8GB、tcp、3072t。全套跑完 ≈ 25-35 分钟(不含 vllm 启动)。
 
 ## 10. 故障排查
 
-| 现象 | 原因 | 处理 |
-|---|---|---|
-| 冷请求也命中 | L2 未清空 | `rm -rf /tmp/mini-l2` 后重启 server |
-| `No module named 'acl'` | PYTHONPATH 被覆盖 | 改用前置追加 |
-| chunk 报非倍数 | chunk < 128 或非 128 倍数 | 用 128/256/512/1024 |
-| warm ≈ cold(0.8-1.0×) | 小模型/短 prompt,传输主导 | 这是有效结论;换 32B + 长 prompt 验证 |
-| RETRIEVE 输出不一致 | 搬运/回填 bug | 立即停测,查 transfer 路径,补回归测试 |
-| vllm 启动失败 | server 未先起 / 端口占用 | 先起 server 再起 vllm;`pkill` 后 sleep 2 |
+| 现象                      | 原因                    | 处理                                  |
+| ----------------------- | --------------------- | ----------------------------------- |
+| 冷请求也命中                  | L2 未清空                | `rm -rf /tmp/mini-l2` 后重启 server    |
+| `No module named 'acl'` | PYTHONPATH 被覆盖        | 改用前置追加                              |
+| chunk 报非倍数              | chunk < 128 或非 128 倍数 | 用 128/256/512/1024                  |
+| warm ≈ cold(0.8-1.0×)   | 小模型/短 prompt,传输主导     | 这是有效结论;换 32B + 长 prompt 验证          |
+| RETRIEVE 输出不一致          | 搬运/回填 bug             | 立即停测,查 transfer 路径,补回归测试            |
+| vllm 启动失败               | server 未先起 / 端口占用     | 先起 server 再起 vllm;`pkill` 后 sleep 2 |
 
 ## 11. 报告模板(每次基准交付)
 
@@ -251,3 +272,4 @@ python benchmarks/concurrent.py --url http://localhost:8000 --model ... \
 - 命中证据:server 日志摘录(RETRIEVE/STORE 行)
 - 结论与备注:<1× 的场景如实说明原因>
 ```
+

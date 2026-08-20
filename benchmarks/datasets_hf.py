@@ -26,7 +26,7 @@ N_CONTEXTS = 20
 N_QUESTIONS = 5
 
 
-def _download_squad() -> list[dict] | None:
+def _download_squad(tok: PreTrainedTokenizer, context_tokens: int) -> list[dict] | None:
     """Try to pull squad validation from the Hugging Face hub."""
     try:
         import datasets
@@ -37,16 +37,25 @@ def _download_squad() -> list[dict] | None:
     except Exception as exc:
         logger.warning("squad download failed (%s); constructing locally", exc)
         return None
-    rows = [r for r in ds if len(r["context"]) > 200][:N_CONTEXTS]
+    by_context: dict[str, list[str]] = {}
+    for row in ds:
+        context = " ".join(row["context"].split())
+        if len(context) <= 200:
+            continue
+        by_context.setdefault(context, []).append(row["question"])
+        if len(by_context) >= N_CONTEXTS and all(
+            len(questions) >= N_QUESTIONS for questions in by_context.values()
+        ):
+            break
     out = []
-    for r in rows:
-        context = " ".join(r["context"].split())[:8000]
-        for q in r["questions"][:N_QUESTIONS]:
-            out.append({"context": context, "question": q})
+    for raw_context, questions in list(by_context.items())[:N_CONTEXTS]:
+        context = repeat_to_tokens(tok, raw_context + " ", context_tokens)
+        for question in questions[:N_QUESTIONS]:
+            out.append({"context": context, "question": question})
     return out if len(out) >= N_CONTEXTS else None
 
 
-def _construct_local(tok: PreTrainedTokenizer) -> list[dict]:
+def _construct_local(tok: PreTrainedTokenizer, context_tokens: int) -> list[dict]:
     """Build 100 deterministic samples: 20 contexts x 5 questions.
 
     Contexts are distinct on purpose: 5 documents x 4 chapter headers, so
@@ -58,21 +67,24 @@ def _construct_local(tok: PreTrainedTokenizer) -> list[dict]:
     for i in range(N_CONTEXTS):
         text = docs[i % len(docs)]
         chapter = i // len(docs) + 1
-        body = repeat_to_tokens(tok, text, 4 * CHUNK_TOKENS)
+        body = repeat_to_tokens(tok, text, context_tokens)
         context = f"Chapter {chapter}. {body}"
         for q in SUFFIXES[:N_QUESTIONS]:
             samples.append({"context": context, "question": q})
     return samples
 
 
-def load_100(tok: PreTrainedTokenizer) -> tuple[list[str], list[int]]:
+def load_100(
+    tok: PreTrainedTokenizer,
+    context_tokens: int = 4 * CHUNK_TOKENS,
+) -> tuple[list[str], list[int]]:
     """Return (prompts, group_ids) for 100 samples.
 
     Prompts are grouped by shared context: ``group_ids[i]`` is the context
     index of prompt ``i`` (0..19); the first prompt of each group is a
     cold run, the rest hit the context prefix.
     """
-    rows = _download_squad() or _construct_local(tok)
+    rows = _download_squad(tok, context_tokens) or _construct_local(tok, context_tokens)
     rows = rows[: N_CONTEXTS * N_QUESTIONS]
     prompts, group_ids = [], []
     for gid, row in enumerate(rows):
