@@ -2,7 +2,7 @@
 
 **English** | [中文](README_zh.md)
 
-mini-llmcache is a pedagogical [LMCache](https://github.com/LMCache/LMCache) reimplementation: a standalone KV-cache server for vLLM that stores hashed prompt chunks and replays matching prefixes to skip prefill — **19.4× faster on GPU and NPU**.
+mini-llmcache is a pedagogical [LMCache](https://github.com/LMCache/LMCache) reimplementation: a standalone KV-cache server for vLLM that stores hashed prompt chunks and replays matching prefixes to skip prefill. Measured on Ascend 910: **up to 19.4× on cold starts** (incl. the first-request NPU warmup penalty), **1.1–1.6× steady-state TTFT** on large models with shared prefixes — and honestly ~1× or less on small models / short prompts.
 
 About 870 lines of Python, no heavy dependencies (`pyzmq`, `blake3`, `torch`): the core ideas of LLM KV-cache sharing — prefix hashing, two-tier caching, reference-counted locks, pipelined transfers — in readable form.
 
@@ -62,7 +62,9 @@ fixed cost on both sides.
 | Qwen3-0.6B | L2 persistence (full restart) | — | 0.97 s | — | chunks prefetched from disk (L2→L1 4.5 GB/s) |
 | Qwen3-0.6B | 3072t exact repeat | 0.41 s | 0.53 s | 0.8× | 11/11 chunks hit, byte-identical output |
 | Qwen3-8B | 3072t exact repeat | 0.58 s | 0.81 s | 0.7× | 11/11 chunks hit, byte-identical output |
-| Qwen3-32B (TP2) | 2560t prefix, 20 reqs | 1.05 s | 0.66 s | **1.6× TTFT** | all L1 hits after the first |
+| Qwen3-32B (TP2) | 2560t prefix, 20 reqs | 1.05 s | 0.66 s | **1.0–1.6× TTFT** | all L1 hits; varies with batch/suffix length |
+| Qwen3-32B (TP2) | multi-turn chain (6 rounds) | 0.82 s | 0.57 s | **1.44× overall** | per-round 0.94–1.54×; decays as the chain grows |
+| Qwen3-32B (TP2) | concurrent, 4×5 shared prefix | — | TTFT p50 1.86 s | 20/20 hits | transfer contention inflates per-request TTFT ~2.8× |
 | Qwen3-32B (TP2) | 8192t exact repeat (tcp) | 2.10 s | 1.86 s | 1.1× | 29/29 chunks hit |
 | Qwen3-32B (TP2) | 8192t exact repeat (**ipc://**) | 2.10 s | 1.42 s | 1.1× | transport −24% vs tcp |
 | Qwen3-32B (TP2) | **16384t exact repeat** | 3.56 s | 2.53 s | **1.4×** | 59/59 L1 hits, byte-identical output |
@@ -79,20 +81,24 @@ benchmark scenarios on a fresh server:
 | 100 SQuAD-style (1KB contexts) | 0.202 s | 0.298 s | 0.72× | 80/80 (100%) hits; short-context transfer dominates |
 | Throughput, 20 shared-prefix reqs | 0.986 s | 0.60 s | **1.6× TTFT / 1.2× wall** | all L1 hits |
 
-Speedup grows with prefix length and is largest in batch shared-prefix serving.
+In single-request scenarios speedup grows with prefix length (3072t→1.1×, 16384t→1.4×). Two caveats measured later: multi-turn chains decay past ~16 chunks (transfer grows linearly while the saved prefill per round is fixed), and concurrent clients sharing one prefix contend for transfer bandwidth (~2.8× per-request TTFT inflation).
 
 **Why small models show ~1×**: prefill on a 0.6B/8B model is very cheap, so the
 cache path's fixed costs (transfer + H2D scatter, ~0.2–0.4 s) cancel the
-savings. The cache wins where prefill dominates: cold starts (19.4×),
-disk-persistent reuse across restarts, shared-prefix serving on larger models
-(1.6× on 32B), and even larger models / longer prompts where prefill grows
-faster than transfer.
+savings. The cache wins where prefill dominates: cold starts (19.4×,
+largely the first-request warmup penalty), disk-persistent reuse across
+restarts, and shared-prefix serving on larger models (1.0–1.6× TTFT on 32B).
+The binding constraint everywhere is transfer bandwidth — multi-turn chains
+and concurrent clients both erode the gain once the moved bytes outweigh the
+prefill saved.
 
 ## Benchmarks
 
-A reproducible 4-scenario benchmark lives in `benchmarks/` (prompt datasets + a
-streaming client that measures time-to-first-token, the part the cache actually
-accelerates). Run it against a live pair with a **fresh cache server**:
+A reproducible benchmark suite lives in `benchmarks/` (six scenarios in
+`bench.py` — exact repeat, shared prefix, no-reuse baseline, 100 SQuAD-style
+samples, throughput, multi-turn incremental — plus `concurrent_bench.py` for
+the concurrency scenario). Design and per-scenario data requirements are
+specified in [docs/benchmark_design.md](docs/benchmark_design.md). Run it against a live pair with a **fresh cache server**:
 
 ```bash
 python benchmarks/bench.py --url http://localhost:8000 --model Qwen/Qwen3-0.6B \
