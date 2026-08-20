@@ -52,7 +52,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizer
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from benchmarks.bench import MAX_OUTPUT_TOKENS, complete, server_hits
+from benchmarks.client import MAX_OUTPUT_TOKENS, complete, server_hits
 from benchmarks.datasets import (
     DOCUMENTS,
     SUFFIXES,
