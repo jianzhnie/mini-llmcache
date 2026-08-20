@@ -326,7 +326,9 @@ def run_throughput(
 
     prefix = repeat_to_tokens(tok, DOCUMENTS["birds"], LONG_CHUNKS * 256)
     prompts = [prefix + " " + SUFFIXES[i % len(SUFFIXES)] for i in range(n_requests)]
-    cold_prompt = repeat_to_tokens(
+    # Distinct header so the cold reference never collides with chunks
+    # cached by scenarios 1/2/6 (rocks etc. appear there without a header).
+    cold_prompt = "Report: " + repeat_to_tokens(
         tok, DOCUMENTS["rocks"], LONG_CHUNKS * 256 + len(tok.encode(SUFFIXES[0]))
     )
 

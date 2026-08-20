@@ -2,7 +2,7 @@
 
 **English** | [中文](README_zh.md)
 
-mini-llmcache is a pedagogical [LMCache](https://github.com/LMCache/LMCache) reimplementation: a standalone KV-cache server for vLLM that stores hashed prompt chunks and replays matching prefixes to skip prefill. Measured on Ascend 910: **up to 19.4× on cold starts** (incl. the first-request NPU warmup penalty), **1.1–1.6× steady-state TTFT** on large models with shared prefixes — and honestly ~1× or less on small models / short prompts.
+mini-llmcache is a pedagogical [LMCache](https://github.com/LMCache/LMCache) reimplementation: a standalone KV-cache server for vLLM that stores hashed prompt chunks and replays matching prefixes to skip prefill. Measured on Ascend 910: **up to 19.4× on cold starts** (incl. the first-request NPU warmup penalty), **0.8–1.1× steady-state TTFT** on a 32B model with shared prefixes, 1.4× on multi-turn chains — and honestly ~1× or less on small models / short prompts.
 
 About 870 lines of Python, no heavy dependencies (`pyzmq`, `blake3`, `torch`): the core ideas of LLM KV-cache sharing — prefix hashing, two-tier caching, reference-counted locks, pipelined transfers — in readable form.
 
@@ -62,12 +62,12 @@ fixed cost on both sides.
 | Qwen3-0.6B | L2 persistence (full restart) | — | 0.97 s | — | chunks prefetched from disk (L2→L1 4.5 GB/s) |
 | Qwen3-0.6B | 3072t exact repeat | 0.41 s | 0.53 s | 0.8× | 11/11 chunks hit, byte-identical output |
 | Qwen3-8B | 3072t exact repeat | 0.58 s | 0.81 s | 0.7× | 11/11 chunks hit, byte-identical output |
-| Qwen3-32B (TP2) | 2560t prefix, 20 reqs | 1.05 s | 0.66 s | **1.0–1.6× TTFT** | all L1 hits; varies with batch/suffix length |
+| Qwen3-32B (TP2) | 2560t prefix, 20 reqs | 0.62 s | 0.88 s | **0.8–1.0× TTFT** | all L1 hits; per-request transfer (~320 MB) ≈ saved prefill |
 | Qwen3-32B (TP2) | multi-turn chain (6 rounds) | 0.82 s | 0.57 s | **1.44× overall** | per-round 0.94–1.54×; decays as the chain grows |
 | Qwen3-32B (TP2) | concurrent, 4×5 shared prefix | — | TTFT p50 1.86 s | 20/20 hits | transfer contention inflates per-request TTFT ~2.8× |
 | Qwen3-32B (TP2) | 8192t exact repeat (tcp) | 2.10 s | 1.86 s | 1.1× | 29/29 chunks hit |
 | Qwen3-32B (TP2) | 8192t exact repeat (**ipc://**) | 2.10 s | 1.42 s | 1.1× | transport −24% vs tcp |
-| Qwen3-32B (TP2) | **16384t exact repeat** | 3.56 s | 2.53 s | **1.4×** | 59/59 L1 hits, byte-identical output |
+| Qwen3-32B (TP2) | **16384t exact repeat** | 3.65 s | 4.18 s | 0.87× | 59/59 hits but 3.8 GB/req transfer; 8 GB L1 holds only ~2 reqs — eviction jitter |
 | Qwen3-32B (TP2) | sweep 最优:chunk=256, L1=8GB | 0.82 s | 0.60 s | **1.36×** | 全矩阵 8 配置中最优 |
 
 **Optimal-config validation (Qwen3-32B TP2, chunk=256 / L1=8GB)** — all five
@@ -75,13 +75,19 @@ benchmark scenarios on a fresh server:
 
 | Scenario | Cold TTFT | Hot TTFT | Speedup | Evidence |
 |---|---|---|---|---|
-| Exact repeat 3072t | 0.633 s | 0.585 s | 1.1× | 11/11 L1 hits, byte-identical output |
-| Shared prefix 3072t | 0.597 s | 0.526 s | 1.1× | 10/10 L1 hits |
-| No reuse (baseline) | 0.570 s | — | — | cold reference |
+| Exact repeat 3072t | 0.560 s | 0.606 s | 0.92× | 11/11 L1 hits, byte-identical output |
+| Shared prefix 3072t | 0.633 s | 0.584 s | 1.08× | 10/10 L1 hits |
+| No reuse (baseline) | 0.546 s | — | — | cold reference (10 samples) |
 | 100 SQuAD-style (1KB contexts) | 0.202 s | 0.298 s | 0.72× | 80/80 (100%) hits; short-context transfer dominates |
-| Throughput, 20 shared-prefix reqs | 0.986 s | 0.60 s | **1.6× TTFT / 1.2× wall** | all L1 hits |
+| Throughput, 20 shared-prefix reqs | 0.62 s | 0.88 s | 0.8× TTFT / 1.0× wall | all L1 hits |
 
-In single-request scenarios speedup grows with prefix length (3072t→1.1×, 16384t→1.4×). Two caveats measured later: multi-turn chains decay past ~16 chunks (transfer grows linearly while the saved prefill per round is fixed), and concurrent clients sharing one prefix contend for transfer bandwidth (~2.8× per-request TTFT inflation).
+At 3072t the cache roughly breaks even (0.92–1.08×): the per-request transfer
+(~320 MB) costs about as much as the prefill it saves. Longer prompts do not
+help — 16384t transfers 3.8 GB/req and an 8 GB L1 holds only ~2 requests, so
+eviction jitter makes warm requests slower than cold (0.87×). The gains that
+survive statistical re-measurement: multi-turn chains (1.44× overall — the
+transfer amortizes across rounds), and concurrent clients (correctness holds,
+20/20 hits, though transfer contention inflates per-request TTFT ~2.8×).
 
 **Why small models show ~1×**: prefill on a 0.6B/8B model is very cheap, so the
 cache path's fixed costs (transfer + H2D scatter, ~0.2–0.4 s) cancel the
