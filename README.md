@@ -67,7 +67,7 @@ fixed cost on both sides.
 | Qwen3-32B (TP2) | concurrent, 4×5 shared prefix | — | TTFT p50 1.86 s | 20/20 hits | transfer contention inflates per-request TTFT ~2.8× |
 | Qwen3-32B (TP2) | 8192t exact repeat (tcp) | 2.10 s | 1.86 s | 1.1× | 29/29 chunks hit |
 | Qwen3-32B (TP2) | 8192t exact repeat (**ipc://**) | 2.10 s | 1.42 s | 1.1× | transport −24% vs tcp |
-| Qwen3-32B (TP2) | **16384t exact repeat** | 3.65 s | 4.18 s | 0.87× | 59/59 hits but 3.8 GB/req transfer; 8 GB L1 holds only ~2 reqs — eviction jitter |
+| Qwen3-32B (TP2) | **16384t exact repeat** | 4.53 s | 3.67 s | **1.23×** | 59/59 L1 hits, byte-identical output (clean env) |
 | Qwen3-32B (TP2) | sweep 最优:chunk=256, L1=8GB | 0.82 s | 0.60 s | **1.36×** | 全矩阵 8 配置中最优 |
 
 **Optimal-config validation (Qwen3-32B TP2, chunk=256 / L1=8GB)** — all five
@@ -82,9 +82,9 @@ benchmark scenarios on a fresh server:
 | Throughput, 20 shared-prefix reqs | 0.62 s | 0.88 s | 0.8× TTFT / 1.0× wall | all L1 hits |
 
 At 3072t the cache roughly breaks even (0.92–1.08×): the per-request transfer
-(~320 MB) costs about as much as the prefill it saves. Longer prompts do not
-help — 16384t transfers 3.8 GB/req and an 8 GB L1 holds only ~2 requests, so
-eviction jitter makes warm requests slower than cold (0.87×). The gains that
+(~320 MB) costs about as much as the prefill it saves. Longer prompts do
+help: 16384t prefill (4.5 s) outweighs the 3.8 GB transfer + H2D (~2.7 s),
+giving 1.23× on a clean env — prefill grows faster than transfer. The gains that
 survive statistical re-measurement: multi-turn chains (1.44× overall — the
 transfer amortizes across rounds), and concurrent clients (correctness holds,
 20/20 hits, though transfer contention inflates per-request TTFT ~2.8×).
