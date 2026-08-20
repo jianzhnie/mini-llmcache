@@ -2,7 +2,7 @@
 
 **English** | [中文](README_zh.md)
 
-mini-llmcache is a pedagogical [LMCache](https://github.com/LMCache/LMCache) reimplementation: a standalone KV-cache server for vLLM that stores hashed prompt chunks and replays matching prefixes to skip prefill. Measured on Ascend 910: **up to 19.4× on cold starts** (incl. the first-request NPU warmup penalty), **0.8–1.1× steady-state TTFT** on a 32B model with shared prefixes, 1.4× on multi-turn chains — and honestly ~1× or less on small models / short prompts.
+mini-llmcache is a pedagogical [LMCache](https://github.com/LMCache/LMCache) reimplementation: a standalone KV-cache server for vLLM that stores hashed prompt chunks and replays matching prefixes to skip prefill. Measured on Ascend 910 (clean env, model warmed up): steady-state TTFT speedups of **1.0–1.2× on 32B** (up to 1.23× at 16384t), and **0.6–1.0× on 0.6B/8B** — honestly, transfer costs often cancel the prefill savings on small models.
 
 About 870 lines of Python, no heavy dependencies (`pyzmq`, `blake3`, `torch`): the core ideas of LLM KV-cache sharing — prefix hashing, two-tier caching, reference-counted locks, pipelined transfers — in readable form.
 
@@ -58,12 +58,12 @@ fixed cost on both sides.
 
 | Model | Scenario | Cold TTFT | Warm TTFT | Speedup | Notes |
 |---|---|---|---|---|---|
-| Qwen3-0.6B | cold start → warm hit (768t) | 18.07 s | **0.93 s** | **19.4×** | prefill fully skipped |
+| Qwen3-0.6B | cold start → warm hit (768t) | 0.77 s | 0.83 s | 0.93× | 19.4× only when the first request includes the NPU warmup penalty |
 | Qwen3-0.6B | L2 persistence (full restart) | — | 0.97 s | — | chunks prefetched from disk (L2→L1 4.5 GB/s) |
-| Qwen3-0.6B | 3072t exact repeat | 0.41 s | 0.53 s | 0.8× | 11/11 chunks hit, byte-identical output |
+| Qwen3-0.6B | 3072t exact repeat | 0.202 s | 0.357 s | 0.57× | 11/11 chunks hit, byte-identical output |
 | Qwen3-8B | 3072t exact repeat | 0.58 s | 0.81 s | 0.7× | 11/11 chunks hit, byte-identical output |
 | Qwen3-32B (TP2) | 2560t prefix, 20 reqs | 0.62 s | 0.88 s | **0.8–1.0× TTFT** | all L1 hits; per-request transfer (~320 MB) ≈ saved prefill |
-| Qwen3-32B (TP2) | multi-turn chain (6 rounds) | 0.82 s | 0.57 s | **1.44× overall** | per-round 0.94–1.54×; decays as the chain grows |
+| Qwen3-32B (TP2) | multi-turn chain (6 rounds) | 0.933 s | 0.943 s | 0.99× overall | per-round 0.97–1.21× (clean env; the earlier 1.44× was a contaminated baseline) |
 | Qwen3-32B (TP2) | concurrent, 4×5 shared prefix | — | TTFT p50 1.86 s | 20/20 hits | transfer contention inflates per-request TTFT ~2.8× |
 | Qwen3-32B (TP2) | 8192t exact repeat (tcp) | 2.10 s | 1.86 s | 1.1× | 29/29 chunks hit |
 | Qwen3-32B (TP2) | 8192t exact repeat (**ipc://**) | 2.10 s | 1.42 s | 1.1× | transport −24% vs tcp |

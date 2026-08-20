@@ -2,7 +2,7 @@
 
 [English](README.md) | **中文**
 
-mini-llmcache 是 [LMCache](https://github.com/LMCache/LMCache) 的迷你教学版,实现了一个 **LLM KV Cache 共享系统**:为 vLLM 挂载一个独立的 KV Cache 缓存服务器,把 LLM 算过的 prompt"草稿"按 256 token 切块哈希后存进 L1 内存 / L2 磁盘,下次遇到相同前缀直接取回、跳过 prefill。Ascend 910 实测:**冷启动最高 19.4×**(含首次请求的 NPU warmup 惩罚),32B 共享前缀稳态 **TTFT 加速 0.8-1.1×**,多轮增量整体 1.44×;小模型/短 prompt 如实为 ~1× 或更低。支持 NVIDIA GPU(torch.cuda)与 Ascend NPU(torch.npu)双平台。
+mini-llmcache 是 [LMCache](https://github.com/LMCache/LMCache) 的迷你教学版,实现了一个 **LLM KV Cache 共享系统**:为 vLLM 挂载一个独立的 KV Cache 缓存服务器,把 LLM 算过的 prompt"草稿"按 256 token 切块哈希后存进 L1 内存 / L2 磁盘,下次遇到相同前缀直接取回、跳过 prefill。Ascend 910 实测(干净环境、模型 warmup 后):32B 稳态 **TTFT 加速 1.0-1.2×**(16384t 达 1.23×),0.6B/8B 为 **0.6-1.0×**——如实地说,小模型上传输成本往往抵消省下的 prefill。支持 NVIDIA GPU(torch.cuda)与 Ascend NPU(torch.npu)双平台。
 
 全部代码约 870 行 Python,只依赖 `pyzmq`、`blake3`、`torch`:前缀哈希、两级缓存、引用计数锁、流水线搬运——LLM KV Cache 共享的核心思想都以可读的形式呈现。
 
@@ -56,12 +56,12 @@ Ascend 910 端到端(全新 server、模型 warmup 后)。TTFT = 首 token 延�
 
 | 模型 | 场景 | 冷 TTFT | 热 TTFT | 加速 | 说明 |
 |---|---|---|---|---|---|
-| Qwen3-0.6B | 冷启动→热命中(768t) | 18.07 s | **0.93 s** | **19.4×** | prefill 完全跳过 |
+| Qwen3-0.6B | 冷启动→热命中(768t) | 0.77 s | 0.83 s | 0.93× | 19.4× 仅当首次请求含 NPU warmup 惩罚时成立 |
 | Qwen3-0.6B | L2 持久化(全量重启) | — | 0.97 s | — | 磁盘预取回 L1(L2→L1 4.5 GB/s) |
-| Qwen3-0.6B | 3072t 完全重复 | 0.41 s | 0.53 s | 0.8× | 11/11 命中,输出逐字节一致 |
+| Qwen3-0.6B | 3072t 完全重复 | 0.202 s | 0.357 s | 0.57× | 11/11 命中,输出逐字节一致 |
 | Qwen3-8B | 3072t 完全重复 | 0.58 s | 0.81 s | 0.7× | 11/11 命中,输出逐字节一致 |
 | **Qwen3-32B(TP2)** | **2560t 前缀 × 20 请求** | 0.62 s | 0.88 s | **0.8-1.0× TTFT** | 全部 L1 命中;每请求传输(~320MB)≈省下的 prefill |
-| Qwen3-32B(TP2) | **多轮增量(6 轮)** | 0.82 s | 0.57 s | **整体 1.44×** | 逐轮 0.94-1.54×;链条变长后收益递减 |
+| Qwen3-32B(TP2) | **多轮增量(6 轮)** | 0.933 s | 0.943 s | **0.99× 整体** | 逐轮 0.97-1.21×(干净环境;此前 1.44× 为污染基线假象) |
 | Qwen3-32B(TP2) | **并发(4×5 共享前缀)** | — | TTFT p50 1.86s | 命中 20/20 | 传输争用使单请求 TTFT 膨胀 ~2.8× |
 | Qwen3-32B(TP2) | 8192t 完全重复(tcp) | 2.10 s | 1.86 s | 1.1× | 29/29 命中 |
 | Qwen3-32B(TP2) | 8192t 完全重复(**ipc://**) | 2.10 s | 1.42 s | 1.1× | 传输段比 tcp 快 24% |
