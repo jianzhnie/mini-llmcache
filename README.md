@@ -75,7 +75,7 @@ benchmark scenarios on a fresh server:
 
 | Scenario | Cold TTFT | Hot TTFT | Speedup | Evidence |
 |---|---|---|---|---|
-| Exact repeat 3072t | 0.560 s | 0.606 s | 0.92× | 11/11 L1 hits, byte-identical output |
+| Exact repeat 3072t | 0.576 s | 0.570 s | 1.01× | 11/11 L1 hits, byte-identical output (clean env) |
 | Shared prefix 3072t | 0.633 s | 0.584 s | 1.08× | 10/10 L1 hits |
 | No reuse (baseline) | 0.546 s | — | — | cold reference (10 samples) |
 | 100 SQuAD-style (1KB contexts) | 0.202 s | 0.298 s | 0.72× | 80/80 (100%) hits; short-context transfer dominates |

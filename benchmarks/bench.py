@@ -148,16 +148,27 @@ def run_exact_repeat(url: str, model: str, tok: PreTrainedTokenizer,
         ttft, _, resp = complete(url, model, cold_prompt)
         cold_ttfts.append(ttft)
         cold_texts.append(resp["text"])
-    hot_ttfts, hot_texts = [], []
-    for _ in range(10):
+    # The first request for this prompt is a cold compute + STORE; warm it
+    # so the 10 measured samples are pure hits.
+    complete(url, model, prompt)
+    hot_ttfts, hot_texts, l1_hits, l2_hits = [], [], 0, 0
+    for i in range(10):
         ttft, _, resp = complete(url, model, prompt)
         hot_ttfts.append(ttft)
         hot_texts.append(resp["text"])
+        hit = server_hits(server_log, {"id": resp.get("id", "")})
+        if "hit L1=" in hit:
+            l1_hits += 1
+        elif "hit L1=0 L2=" in hit:
+            l2_hits += 1
+        if i < 3:
+            print(f"  hot[{i}] ttft={ttft:.3f}s {hit}")
     # Same prompt repeated 10x must produce identical output (hot self-consistency);
     # the 5 cold samples are distinct documents, used only as a latency baseline.
     consistent = len(set(hot_texts)) == 1
     hits = server_hits(server_log, {"id": resp.get("id", "")})
     summarize("exact_repeat", cold_ttfts, hot_ttfts, hits, consistent)
+    print(f"  命中分布: L1={l1_hits}/10, L2={l2_hits}/10")
 
 
 def run_shared_prefix(url: str, model: str, tok: PreTrainedTokenizer,
